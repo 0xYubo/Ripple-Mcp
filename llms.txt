@@ -1,0 +1,78 @@
+# Ripple-MCP
+
+> 字段级语义变更影响分析 MCP Server，专为 Claude Code 设计。回答「改了这个字段/函数/配置，哪些代码会受影响」。
+
+## 适用场景
+
+- 数据库字段改名或改类型，需要找出所有引用该字段的代码
+- 重构公共函数，需要找出所有调用方
+- 修改 API 路径，需要扫描前后端所有引用
+- 删除常量或枚举值，确认是否有残留引用
+- 修改坐标语义（如从左上角改为中心点），找出所有涉及计算的代码
+- 发布前评估改动影响范围，生成结构化报告
+
+## MCP 工具列表
+
+### scan_patterns
+在代码库中搜索任意正则表达式。支持 Python / TypeScript / JavaScript / SQL / YAML 等所有文本文件。
+- 输入：project_path, patterns（正则列表）, extensions（可选）
+- 输出：命中行列表，含文件路径、行号、代码内容、置信度
+
+### analyze_python_ast
+对 Python 代码做 AST 级别精确分析，比 grep 更准确。区分 obj.field / obj['field'] / obj.get('field') 三种访问方式，标注所在函数名和置信度。
+- 支持：field_names（字段访问）、string_values（字符串字面量）、symbols（标识符）、call_names（函数调用）、import_names（导入）
+- 输出：命中列表，含文件、行号、列号、所在函数、访问类型（kind）、置信度
+
+### trace_callers
+找出项目中所有直接调用指定函数的函数和文件。
+- 输入：project_path, function_name
+- 输出：调用位置列表，含文件、行号、所在函数名
+
+### get_code_context
+获取指定文件某一行前后的代码上下文，辅助判断命中处是否真正受影响。
+- 输入：file_path, line_number, context_lines（默认 6）
+- 输出：前后各 N 行的完整代码片段
+
+### generate_impact_report
+将扫描结果聚合成结构化 Markdown 影响分析报告。自动读取服务端缓存，无需重新传递扫描结果。
+- 输入：change_description（自然语言描述变更）, project_path
+- 输出：Markdown 格式的影响报告，含高/中/低风险分类
+
+## 推荐工作流
+
+```
+用户描述变更意图（自然语言）
+  → scan_patterns + analyze_python_ast（并行扫描）
+  → get_code_context（对可疑命中确认上下文）
+  → generate_impact_report（生成最终报告）
+```
+
+## 与其他工具的关系
+
+- 与 codegraph 互补：codegraph 做函数调用图，Ripple-MCP 做字段级语义分析
+- 不替代 LSP / IDE 跳转：专注于「变更影响范围」这一具体问题
+- 支持多语言：Python 有 AST 精确分析，TypeScript / JavaScript 用正则扫描
+
+## 安装
+
+```bash
+# 源码安装（当前推荐，PyPI 版本待发布）
+git clone https://github.com/ybmyb/Ripple-Mcp.git
+cd Ripple-Mcp
+pip install -e .
+claude mcp add ripple -s user \
+  -e PYTHONPATH=/path/to/Ripple-Mcp/src \
+  -- python3 -m field_impact_mcp
+```
+
+## 依赖
+
+- Python 3.10+
+- mcp >= 1.0.0
+- anyio >= 4.0.0
+- ripgrep（可选，自动降级到系统 grep）
+
+## 项目地址
+
+- GitHub: https://github.com/ybmyb/Ripple-Mcp
+- License: MIT
