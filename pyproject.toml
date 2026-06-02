@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "field-impact-mcp"
+name = "ripple-mcp"
 version = "0.1.0"
-description = "MCP server for semantic field-level impact analysis across codebases"
+description = "Field-level semantic impact analysis for Claude Code — see the ripple effect of any code change"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-keywords = ["mcp", "code-analysis", "impact-analysis", "ast", "claude"]
+keywords = ["mcp", "code-analysis", "impact-analysis", "ast", "claude", "ripple", "semantic"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -22,11 +22,11 @@ dependencies = [
 ]
 
 [project.scripts]
-field-impact-mcp = "field_impact_mcp.__main__:main"
+ripple-mcp = "field_impact_mcp.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/ybmyb/field-impact-mcp"
-Issues = "https://github.com/ybmyb/field-impact-mcp/issues"
+Homepage = "https://github.com/ybmyb/Ripple-Mcp"
+Issues = "https://github.com/ybmyb/Ripple-Mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/field_impact_mcp"]

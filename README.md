@@ -1,4 +1,4 @@
-# field-impact-mcp
+# Ripple-Mcp
 
 **超越调用链的代码影响分析 MCP 工具**
 
@@ -18,7 +18,7 @@
 - 哪些地方有**这个类型注解**？（`def fn(x: float) -> MyClass`）
 - TypeScript/JavaScript 里哪些地方用了这个变量？
 
-`field-impact-mcp` 在调用链之上叠加**字段级扫描**，把 Claude Code 的语义理解能力与 ripgrep/AST 的机械精确性结合起来，覆盖 codegraph 做不到的所有盲区。
+`Ripple-Mcp` 在调用链之上叠加**字段级扫描**，把 Claude Code 的语义理解能力与 ripgrep/AST 的机械精确性结合起来，覆盖 codegraph 做不到的所有盲区。
 
 ---
 
@@ -63,7 +63,7 @@
 
 ```bash
 # 添加到 Claude Code 用户全局（所有项目可用）
-claude mcp add field-impact -s user -- uvx field-impact-mcp
+claude mcp add field-impact -s user -- uvx Ripple-Mcp
 ```
 
 > 发布 PyPI 后即可使用此方式。
@@ -71,13 +71,13 @@ claude mcp add field-impact -s user -- uvx field-impact-mcp
 ### 方式二：本地开发安装
 
 ```bash
-git clone https://github.com/ybmyb/field-impact-mcp.git
-cd field-impact-mcp
+git clone https://github.com/ybmyb/Ripple-Mcp.git
+cd Ripple-Mcp
 pip install -e .
 
 # 添加到 Claude Code
 claude mcp add field-impact -s user -- python3 -m field_impact_mcp \
-  --env PYTHONPATH=/path/to/field-impact-mcp/src
+  --env PYTHONPATH=/path/to/Ripple-Mcp/src
 ```
 
 ---
@@ -218,8 +218,8 @@ Claude 会在以下情况自动使用此工具：
 ## 开发
 
 ```bash
-git clone https://github.com/ybmyb/field-impact-mcp.git
-cd field-impact-mcp
+git clone https://github.com/ybmyb/Ripple-Mcp.git
+cd Ripple-Mcp
 pip install -e .
 pytest tests/ -v
 ```
@@ -235,7 +235,7 @@ pytest tests/ -v
 
 ## 与 codegraph 对比
 
-| 能力 | codegraph | field-impact-mcp |
+| 能力 | codegraph | Ripple-Mcp |
 |---|---|---|
 | 函数调用链 | ✅ 精确 | ✅ 通过 call_names |
 | 字段级访问分析 | ❌ | ✅ |
@@ -245,7 +245,7 @@ pytest tests/ -v
 | 跨语言搜索 | ❌ | ✅ |
 | 语义变更影响分析 | ❌ | ✅（配合 Claude） |
 
-**推荐组合使用**：codegraph 做调用链，field-impact-mcp 做字段级语义影响分析，两者互补。
+**推荐组合使用**：codegraph 做调用链，Ripple-Mcp 做字段级语义影响分析，两者互补。
 
 ---
 
