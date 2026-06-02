@@ -63,9 +63,7 @@
 
 ## 安装
 
-### 方式一：uvx（即将支持，等待 PyPI 发布）
-
-> **⚠️ 尚未发布至 PyPI，此方式暂不可用。** 发布后将在此更新。
+### 方式一：uvx（推荐，需已安装 uv）
 
 ```bash
 claude mcp add ripple -s user -- uvx ripple-mcp
