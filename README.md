@@ -59,26 +59,33 @@
 
 ## 安装
 
-### 方式一：uvx（推荐，无需手动安装）
+### 方式一：uvx（即将支持，等待 PyPI 发布）
+
+> **⚠️ 尚未发布至 PyPI，此方式暂不可用。** 发布后将在此更新。
 
 ```bash
-# 添加到 Claude Code 用户全局（所有项目可用）
-claude mcp add field-impact -s user -- uvx Ripple-Mcp
+# PyPI 发布后，一行命令即可添加到 Claude Code 用户全局（所有项目可用）
+claude mcp add ripple -s user -- uvx ripple-mcp
 ```
 
-> 发布 PyPI 后即可使用此方式。
+---
 
-### 方式二：本地开发安装
+### 方式二：从源码安装（当前推荐）
 
 ```bash
+# 1. 克隆仓库
 git clone https://github.com/ybmyb/Ripple-Mcp.git
 cd Ripple-Mcp
+
+# 2. 安装依赖
 pip install -e .
 
-# 添加到 Claude Code
-claude mcp add field-impact -s user -- python3 -m field_impact_mcp \
+# 3. 添加到 Claude Code 用户全局（所有项目可用）
+claude mcp add ripple -s user -- python3 -m field_impact_mcp \
   --env PYTHONPATH=/path/to/Ripple-Mcp/src
 ```
+
+> `-s user` 表示用户全局配置，**不限于某个项目**，任何项目打开 Claude Code 均可使用。
 
 ---
 
