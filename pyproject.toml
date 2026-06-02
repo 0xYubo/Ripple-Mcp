@@ -30,8 +30,8 @@ dependencies = [
 ripple-mcp = "field_impact_mcp.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/ybmyb/Ripple-Mcp"
-Issues = "https://github.com/ybmyb/Ripple-Mcp/issues"
+Homepage = "https://github.com/0xYubo/Ripple-Mcp"
+Issues = "https://github.com/0xYubo/Ripple-Mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/field_impact_mcp"]

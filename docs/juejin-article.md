@@ -146,7 +146,7 @@ Claude 会自动：
 目前从源码安装（PyPI 版本即将发布）：
 
 ```bash
-git clone https://github.com/ybmyb/Ripple-Mcp.git
+git clone https://github.com/0xYubo/Ripple-Mcp.git
 cd Ripple-Mcp
 pip install -e .
 
@@ -177,6 +177,6 @@ claude mcp add ripple -s user \
 
 ---
 
-项目地址：**https://github.com/ybmyb/Ripple-Mcp**
+项目地址：**https://github.com/0xYubo/Ripple-Mcp**
 
 如果你也有过「不知道改了这里会影响哪里」的焦虑，可以试试看。欢迎 Star 和提 Issue。

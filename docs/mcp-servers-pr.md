@@ -46,7 +46,7 @@ Ripple-MCP adds **field-level scanning** on top, covering blind spots that call 
 Source install (PyPI release coming soon):
 
 \`\`\`bash
-git clone https://github.com/ybmyb/Ripple-Mcp.git
+git clone https://github.com/0xYubo/Ripple-Mcp.git
 pip install -e Ripple-Mcp
 claude mcp add ripple -s user \
   -e PYTHONPATH=/path/to/Ripple-Mcp/src \
@@ -55,7 +55,7 @@ claude mcp add ripple -s user \
 
 ## Links
 
-- GitHub: https://github.com/ybmyb/Ripple-Mcp
+- GitHub: https://github.com/0xYubo/Ripple-Mcp
 - License: MIT
 - Python 3.10+
 ```
@@ -67,7 +67,7 @@ claude mcp add ripple -s user \
 在 `Community Servers` 列表中，按字母顺序找到 R 的位置，插入：
 
 ```markdown
-- **[Ripple-MCP](https://github.com/ybmyb/Ripple-Mcp)** - Field-level semantic impact analysis. Answers "if I change this field/function, what breaks?" across Python/TypeScript/JavaScript codebases. Tools: scan_patterns, analyze_python_ast, trace_callers, generate_impact_report.
+- **[Ripple-MCP](https://github.com/0xYubo/Ripple-Mcp)** - Field-level semantic impact analysis. Answers "if I change this field/function, what breaks?" across Python/TypeScript/JavaScript codebases. Tools: scan_patterns, analyze_python_ast, trace_callers, generate_impact_report.
 ```
 
 ---
