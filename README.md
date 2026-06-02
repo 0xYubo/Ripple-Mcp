@@ -2,10 +2,12 @@
 
 **字段级语义变更影响分析 · MCP Server for Claude Code**
 
-[![PyPI version](https://img.shields.io/pypi/v/ripple-mcp.svg)](https://pypi.org/project/ripple-mcp/)
+[![PyPI - 暂未发布](https://img.shields.io/badge/PyPI-暂未发布-lightgrey.svg)](#)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
+
+> ⚠️ **当前未发布到 PyPI**，请使用源码安装方式（见下方「快速开始」）。
 
 > 传统代码图谱只能追踪函数调用链。Ripple-MCP 在此之上叠加**字段级扫描**，让 Claude Code 能回答「改了这个字段，哪些代码会受影响」。
 
@@ -28,13 +30,13 @@ Ripple-MCP 把 Claude Code 的语义理解与 ripgrep / Python AST 的机械精�
 
 ## 快速开始
 
-### 方式一：uvx（推荐，零安装）
+### 方式一：uvx（待 PyPI 发布后可用）
 
 ```bash
 claude mcp add ripple -s user -- uvx ripple-mcp
 ```
 
-### 方式二：从源码安装
+### 方式二：从源码安装（当前推荐）
 
 ```bash
 git clone https://github.com/ybmyb/Ripple-Mcp.git
