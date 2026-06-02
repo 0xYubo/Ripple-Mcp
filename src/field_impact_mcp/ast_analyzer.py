@@ -6,23 +6,54 @@ from __future__ import annotations
 
 import ast
 import os
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+
+from ._utils import validate_project_path
+
+_DEFAULT_EXCLUDE = {
+    ".venv", "venv", "__pycache__", "node_modules",
+    ".git", "dist", "build", ".next", ".mypy_cache",
+}
+
+# A4：根据 kind 分配置信度
+_CONFIDENCE: dict[str, str] = {
+    "attr_access":      "high",
+    "subscript_access": "high",
+    "get_call":         "high",
+    "call":             "medium",
+    "function_def":     "medium",
+    "class_def":        "medium",
+    "import":           "medium",
+    "import_from":      "medium",
+    "import_symbol":    "medium",
+    "name_ref":         "medium",
+    "assignment":       "medium",
+    "string_literal":   "medium",
+    "string_subscript": "medium",
+    "get_call_str":     "medium",
+    "type_annotation":  "low",
+}
 
 
 class _UniversalVisitor(ast.NodeVisitor):
     """
     通用访问器：按需收集不同类型的节点。
     通过 targets 参数控制收集哪些类型。
+
+    _suppressed：记录已被父节点处理过的 ast 节点 id()，visit_Name / visit_Constant
+    开头检查该集合，避免 generic_visit 触发子节点时产生重复命中（Bug 1、Bug 2）。
     """
 
     def __init__(
         self,
-        symbols: set[str],           # 任何名字（变量、函数、类、常量）
-        field_names: set[str],        # 字段名（用于 obj.field / obj['field']）
-        string_values: set[str],      # 字符串字面量值
-        call_names: set[str],         # 函数调用名
-        import_names: set[str],       # 导入模块/符号名
+        symbols: set[str],
+        field_names: set[str],
+        string_values: set[str],
+        call_names: set[str],
+        import_names: set[str],
     ):
         self.symbols = symbols
         self.field_names = field_names
@@ -31,137 +62,170 @@ class _UniversalVisitor(ast.NodeVisitor):
         self.import_names = import_names
         self.hits: list[dict[str, Any]] = []
         self._func_stack: list[str] = []
+        self._suppressed: set[int] = set()   # Bug 1/2：已处理节点 id，防止重复命中
 
     def _func(self) -> str:
         return self._func_stack[-1] if self._func_stack else "<module>"
 
-    def _add(self, node: ast.AST, kind: str, value: str, extra: str = ""):
+    def _add(self, node: ast.AST, kind: str, value: str, extra: str = "") -> None:
         self.hits.append({
-            "line": getattr(node, "lineno", 0),
-            "col": getattr(node, "col_offset", 0),
-            "kind": kind,
-            "value": value,
-            "extra": extra,
-            "function": self._func(),
+            "line":       getattr(node, "lineno", 0),
+            "col":        getattr(node, "col_offset", 0),
+            "kind":       kind,
+            "value":      value,
+            "extra":      extra,
+            "function":   self._func(),
+            "confidence": _CONFIDENCE.get(kind, "medium"),
         })
 
-    def _check_annotation(self, ann_node: ast.expr | None, context: str):
-        """检查类型注解节点是否含有目标 symbol。"""
+    def _check_annotation(self, ann_node: ast.expr | None, context: str) -> None:
+        """ast.walk 精确匹配注解中的 symbol。
+        Bug 4 修复：去掉 break，用 matched_ids 避免同一 symbol 重复记录，
+                   但允许 Union[A, B] 中 A 和 B 各自独立记录。
+        Bug 1 修复：把注解里所有 Name 节点压入 _suppressed，
+                   防止 generic_visit 再触发 visit_Name 产生重复 name_ref。
+        """
         if ann_node is None:
             return
-        ann_str = ast.unparse(ann_node) if hasattr(ast, "unparse") else ""
-        for sym in self.symbols:
-            if sym in ann_str:
-                self._add(ann_node, "type_annotation", ann_str, context)
-                break
+        matched_ids: set[str] = set()
+        for child in ast.walk(ann_node):
+            if isinstance(child, ast.Name):
+                self._suppressed.add(id(child))         # Bug 1
+                if child.id in self.symbols and child.id not in matched_ids:
+                    matched_ids.add(child.id)
+                    self._add(ann_node, "type_annotation", child.id, context)  # Bug 4
 
-    def visit_FunctionDef(self, node: ast.FunctionDef):
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._func_stack.append(node.name)
-        # 函数名本身
-        if node.name in self.symbols or node.name in self.call_names:
-            self._add(node, "function_def", node.name)
-        # 参数类型注解：def fn(x: float, y: SomeType)
-        for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
-            self._check_annotation(arg.annotation, f"param:{arg.arg}")
-        if node.args.vararg:
-            self._check_annotation(node.args.vararg.annotation, f"param:*{node.args.vararg.arg}")
-        if node.args.kwarg:
-            self._check_annotation(node.args.kwarg.annotation, f"param:**{node.args.kwarg.arg}")
-        # 返回值类型注解：def fn() -> SomeType
-        self._check_annotation(node.returns, "return_type")
-        self.generic_visit(node)
-        self._func_stack.pop()
+        try:  # Bug 3：保证异常时 _func_stack 不残留脏帧
+            if node.name in self.symbols or node.name in self.call_names:
+                self._add(node, "function_def", node.name)
+            for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+                self._check_annotation(arg.annotation, f"param:{arg.arg}")
+            if node.args.vararg:
+                self._check_annotation(node.args.vararg.annotation, f"param:*{node.args.vararg.arg}")
+            if node.args.kwarg:
+                self._check_annotation(node.args.kwarg.annotation, f"param:**{node.args.kwarg.arg}")
+            self._check_annotation(node.returns, "return_type")
+            self.generic_visit(node)
+        finally:
+            self._func_stack.pop()
 
-    visit_AsyncFunctionDef = visit_FunctionDef
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # type: ignore[override]
+        self.visit_FunctionDef(node)  # type: ignore[arg-type]
 
-    def visit_ClassDef(self, node: ast.ClassDef):
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
         if node.name in self.symbols:
             self._add(node, "class_def", node.name)
         self.generic_visit(node)
 
-    def visit_Name(self, node: ast.Name):
-        # 变量 / 常量引用
+    def visit_Name(self, node: ast.Name) -> None:
+        # Bug 1：跳过已被父节点处理的 Name 节点（assignment target、注解内 Name）
+        if id(node) in self._suppressed:
+            self.generic_visit(node)
+            return
         if node.id in self.symbols:
             self._add(node, "name_ref", node.id)
         self.generic_visit(node)
 
-    def visit_Attribute(self, node: ast.Attribute):
-        # obj.field
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        # Bug 1B：call 已被父节点记录时（func 被压制），跳过对该 Attribute 的 attr_access 记录
+        if id(node) in self._suppressed:
+            self.generic_visit(node)
+            return
         if node.attr in self.field_names:
-            obj = ast.unparse(node.value) if hasattr(ast, "unparse") else "?"
+            obj = ast.unparse(node.value)
             self._add(node, "attr_access", node.attr, obj)
-        # obj 本身也可能是 symbol
-        if isinstance(node.value, ast.Name) and node.value.id in self.symbols:
-            self._add(node.value, "name_ref", node.value.id, f"via .{node.attr}")
         self.generic_visit(node)
 
-    def visit_Subscript(self, node: ast.Subscript):
-        # obj['field']
+    def visit_Subscript(self, node: ast.Subscript) -> None:
         sl = node.slice
-        if isinstance(sl, ast.Constant) and sl.value in self.field_names:
-            obj = ast.unparse(node.value) if hasattr(ast, "unparse") else "?"
-            self._add(node, "subscript_access", str(sl.value), obj)
-        # 字符串字面量匹配
-        if isinstance(sl, ast.Constant) and isinstance(sl.value, str) and sl.value in self.string_values:
-            self._add(node, "string_subscript", sl.value)
+        if isinstance(sl, ast.Constant):
+            if sl.value in self.field_names:
+                obj = ast.unparse(node.value)
+                self._add(node, "subscript_access", str(sl.value), obj)
+            if isinstance(sl.value, str) and sl.value in self.string_values:
+                self._add(node, "string_subscript", sl.value)
+                self._suppressed.add(id(sl))   # Bug 2：防止 visit_Constant 再记 string_literal
         self.generic_visit(node)
 
-    def visit_Constant(self, node: ast.Constant):
-        # 字符串常量
+    def visit_Constant(self, node: ast.Constant) -> None:
+        # Bug 2：跳过已被 visit_Subscript / visit_Call 处理的 Constant 节点
+        if id(node) in self._suppressed:
+            self.generic_visit(node)
+            return
         if isinstance(node.value, str) and node.value in self.string_values:
             self._add(node, "string_literal", node.value)
         self.generic_visit(node)
 
-    def visit_Call(self, node: ast.Call):
-        # 函数调用：fn(...) 或 obj.fn(...)
+    def visit_Call(self, node: ast.Call) -> None:
         func = node.func
         name = None
         if isinstance(func, ast.Name):
             name = func.id
         elif isinstance(func, ast.Attribute):
             name = func.attr
-            # obj.get('field') 模式
             if name == "get" and node.args and isinstance(node.args[0], ast.Constant):
                 val = node.args[0].value
                 if val in self.field_names:
-                    obj = ast.unparse(func.value) if hasattr(ast, "unparse") else "?"
+                    obj = ast.unparse(func.value)
                     self._add(node, "get_call", str(val), obj)
                 if isinstance(val, str) and val in self.string_values:
                     self._add(node, "get_call_str", str(val))
-
+                    self._suppressed.add(id(node.args[0]))  # Bug 2：防止 visit_Constant 再记 string_literal
         if name and (name in self.call_names or name in self.symbols):
             self._add(node, "call", name)
+            self._suppressed.add(id(func))  # Bug 1：压制 func 节点，阻止 visit_Name/visit_Attribute 重复记录
         self.generic_visit(node)
 
-    def visit_Import(self, node: ast.Import):
+    def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
-            if alias.name in self.import_names or alias.asname in (self.import_names - {None}):
+            if alias.name in self.import_names or (
+                alias.asname is not None and alias.asname in self.import_names
+            ):
                 self._add(node, "import", alias.name, alias.asname or "")
         self.generic_visit(node)
 
-    def visit_ImportFrom(self, node: ast.ImportFrom):
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         mod = node.module or ""
-        if mod in self.import_names or any(p in mod for p in self.import_names):
+        # Bug 5 修复：精确匹配或包名前缀匹配，不做子串匹配
+        # "tools" 不再命中 "plogen_tools"，但仍命中 "tools" 和 "tools.utils"
+        if any(mod == p or mod.startswith(p + ".") for p in self.import_names):
             self._add(node, "import_from", mod)
         for alias in node.names:
             if alias.name in self.import_names or alias.name in self.symbols:
                 self._add(node, "import_symbol", alias.name, mod)
         self.generic_visit(node)
 
-    def visit_AnnAssign(self, node: ast.AnnAssign):
-        # 类型注解：x: SomeType = ...
-        ann = ast.unparse(node.annotation) if hasattr(ast, "unparse") else ""
-        for sym in self.symbols:
-            if sym in ann:
-                self._add(node, "type_annotation", ann)
-                break
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        # 压制注解内所有 Name 节点，防止 generic_visit → visit_Name 重复记录
+        matched_ids: set[str] = set()
+        for child in ast.walk(node.annotation):
+            if isinstance(child, ast.Name):
+                self._suppressed.add(id(child))
+                if child.id in self.symbols and child.id not in matched_ids:
+                    matched_ids.add(child.id)
+                    self._add(node, "type_annotation", child.id, "ann_assign")
+        # Bug 2：带注解赋值的 target（如 `x: int = 30` 中的 x）应记录为 assignment，
+        # 而非让 generic_visit → visit_Name 误记为 name_ref
+        if isinstance(node.target, ast.Name) and node.target.id in self.symbols:
+            self._suppressed.add(id(node.target))
+            self._add(node.target, "assignment", node.target.id)
         self.generic_visit(node)
 
-    def visit_Assign(self, node: ast.Assign):
-        # 赋值目标中的 symbol
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id in self.symbols:
+    def _collect_assign_targets(self, target: ast.expr) -> None:
+        """Bug 4：递归处理赋值目标，支持元组/列表解包，如 a, b = fn()。"""
+        if isinstance(target, ast.Name):
+            if target.id in self.symbols:
+                self._suppressed.add(id(target))
                 self._add(target, "assignment", target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                self._collect_assign_targets(elt)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._collect_assign_targets(target)
         self.generic_visit(node)
 
 
@@ -177,7 +241,7 @@ def analyze_file(
     try:
         source = Path(file_path).read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(source, filename=file_path)
-    except (SyntaxError, Exception):
+    except Exception:
         return []
 
     visitor = _UniversalVisitor(
@@ -202,24 +266,66 @@ def analyze_project(
     call_names: list[str] | None = None,
     import_names: list[str] | None = None,
     exclude_dirs: list[str] | None = None,
+    max_results: int = 2000,
 ) -> list[dict[str, Any]]:
-    """递归分析整个项目的所有 .py 文件。"""
-    excl = set(exclude_dirs or [".venv", "venv", "__pycache__", "node_modules", ".git"])
-    all_hits: list[dict] = []
+    """递归分析整个项目的所有 .py 文件（A2：ThreadPoolExecutor 并发）。
+    设计6：max_results 上限与 scan_patterns 对称，防止大项目打爆 context window。
+    """
+    validate_project_path(project_path)   # 问题3：复用共享校验，消除与 scanner.py 的重复
 
+    excl = set(exclude_dirs) if exclude_dirs is not None else _DEFAULT_EXCLUDE
+
+    py_files: list[str] = []
     for root, dirs, files in os.walk(project_path):
         dirs[:] = [d for d in dirs if d not in excl]
         for fname in files:
             if fname.endswith(".py"):
-                hits = analyze_file(
-                    os.path.join(root, fname),
-                    symbols=symbols,
-                    field_names=field_names,
-                    string_values=string_values,
-                    call_names=call_names,
-                    import_names=import_names,
-                )
-                all_hits.extend(hits)
+                py_files.append(os.path.join(root, fname))
+
+    all_hits: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=min(8, len(py_files) or 1)) as pool:
+        futures = {
+            pool.submit(
+                analyze_file, fp,
+                symbols, field_names, string_values, call_names, import_names,
+            ): fp
+            for fp in py_files
+        }
+        for future in as_completed(futures):
+            try:
+                all_hits.extend(future.result())
+            except Exception as e:
+                print(f"[field-impact-mcp] 跳过 {futures[future]}: {e}", file=sys.stderr)
 
     all_hits.sort(key=lambda h: (h["file"], h["line"]))
+
+    # 设计6：截断保护，超出上限时附加提示条目
+    if len(all_hits) > max_results:
+        all_hits = all_hits[:max_results]
+        all_hits.append({
+            "file": "__truncated__",
+            "line": 0,
+            "col": 0,
+            "kind": "__truncated__",
+            "value": f"结果已截断，仅显示前 {max_results} 条。请缩小搜索目标范围或增大 max_results。",
+            "extra": "",
+            "function": "",
+            "confidence": "low",
+        })
+
     return all_hits
+
+
+def trace_callers(
+    project_path: str,
+    function_name: str,
+    exclude_dirs: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """A3：找出所有直接调用 function_name 的函数和文件。"""
+    hits = analyze_project(
+        project_path=project_path,
+        call_names=[function_name],
+        exclude_dirs=exclude_dirs,
+    )
+    return [h for h in hits if h["kind"] == "call"]

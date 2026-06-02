@@ -5,24 +5,47 @@ MCP Server：field-impact-mcp  —  通用语义影响分析工具
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from typing import Any
 
 import mcp.server.stdio
 import mcp.types as types
 from mcp.server import Server
 
-from .ast_analyzer import analyze_project
+from .ast_analyzer import analyze_project, trace_callers
 from .reporter import build_report
 from .scanner import get_context, scan
 
 server = Server("field-impact-mcp")
+
+# A1：服务端会话缓存，key = project_path
+# 新问题3修复：改用 OrderedDict 实现 LRU 驱逐（最近使用的留在末尾，超限淘汰头部），
+#             替代之前简单 FIFO（next(iter(_cache))）
+_CACHE_MAX = 20
+_cache: OrderedDict[str, dict[str, list]] = OrderedDict()
+
+
+def _cache_set(project_path: str, key: str, value: list) -> None:
+    if project_path in _cache:
+        _cache.move_to_end(project_path)   # LRU：刚写入的移到末尾（最近使用）
+    else:
+        if len(_cache) >= _CACHE_MAX:
+            _cache.popitem(last=False)     # 淘汰最久未使用的（头部）
+        _cache[project_path] = {"scan_results": [], "ast_results": []}
+    _cache[project_path][key] = value
+
+
+def _cache_get(project_path: str) -> dict[str, list]:
+    if project_path in _cache:
+        _cache.move_to_end(project_path)   # LRU：读取也更新位置
+    return _cache.get(project_path, {"scan_results": [], "ast_results": []})
 
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     return [
 
-        # ── 1. 通用 pattern 扫描（主力工具）────────────────────────────
+        # ── 1. 通用 pattern 扫描 ─────────────────────────────────────
         types.Tool(
             name="scan_patterns",
             description=(
@@ -36,10 +59,7 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "required": ["project_path", "patterns"],
                 "properties": {
-                    "project_path": {
-                        "type": "string",
-                        "description": "项目根目录绝对路径",
-                    },
+                    "project_path": {"type": "string", "description": "项目根目录绝对路径"},
                     "patterns": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -57,14 +77,18 @@ async def list_tools() -> list[types.Tool]:
                     "extensions": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "文件扩展名，默认 ['.py','.ts','.tsx','.js','.jsx']，可传 ['.sql','.yaml','.json'] 等",
+                        "description": "文件扩展名，默认 ['.py','.ts','.tsx','.js','.jsx']",
                         "default": [".py", ".ts", ".tsx", ".js", ".jsx"],
                     },
                     "exclude_dirs": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "排除目录",
-                        "default": [],
+                        "description": "排除目录，不传则使用默认排除列表（node_modules/.venv/dist 等），传 [] 则不排除任何目录",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "最大返回结果数，默认 2000",
+                        "default": 2000,
                     },
                 },
             },
@@ -81,51 +105,20 @@ async def list_tools() -> list[types.Tool]:
                 "- string_values: 字符串字面量值（捕获代码中的字符串常量）\n"
                 "- call_names: 函数/方法调用名\n"
                 "- import_names: 导入的模块或符号名\n"
-                "每个命中都标注所在函数名和访问类型，适合需要精确上下文的场景。"
+                "每个命中都标注所在函数名、访问方式和置信度，适合需要精确上下文的场景。"
             ),
             inputSchema={
                 "type": "object",
                 "required": ["project_path"],
                 "properties": {
-                    "project_path": {
-                        "type": "string",
-                        "description": "Python 项目根目录绝对路径",
-                    },
-                    "symbols": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "标识符名列表，如 ['AllEq', 'DEFAULT_TTL', 'match_pos_count']",
-                        "default": [],
-                    },
-                    "field_names": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "字段/属性名列表，如 ['x', 'y', 'survey_status_today']",
-                        "default": [],
-                    },
-                    "string_values": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "字符串字面量值列表，如 ['success', 'failed', 'X-API-Key']",
-                        "default": [],
-                    },
-                    "call_names": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "函数/方法调用名列表，如 ['get_eq_partition', 'validate_api_key']",
-                        "default": [],
-                    },
-                    "import_names": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "导入符号/模块名列表，如 ['plogen_tools', 'ExternalApiKeyService']",
-                        "default": [],
-                    },
-                    "exclude_dirs": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "default": [],
-                    },
+                    "project_path": {"type": "string", "description": "Python 项目根目录绝对路径"},
+                    "symbols":       {"type": "array", "items": {"type": "string"}, "description": "标识符名列表，如 ['AllEq', 'DEFAULT_TTL']"},
+                    "field_names":   {"type": "array", "items": {"type": "string"}, "description": "字段/属性名列表，如 ['x', 'y', 'status']"},
+                    "string_values": {"type": "array", "items": {"type": "string"}, "description": "字符串字面量值列表，如 ['success', 'failed']"},
+                    "call_names":    {"type": "array", "items": {"type": "string"}, "description": "函数/方法调用名列表，如 ['get_eq_partition']"},
+                    "import_names":  {"type": "array", "items": {"type": "string"}, "description": "导入符号/模块名列表，如 ['plogen_tools']"},
+                    "exclude_dirs":  {"type": "array", "items": {"type": "string"}, "description": "排除目录，不传则使用默认排除列表，传 [] 则不排除任何目录"},
+                    "max_results":   {"type": "integer", "description": "最大返回结果数，默认 2000", "default": 2000},
                 },
             },
         ),
@@ -148,16 +141,17 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
 
-        # ── 4. 生成报告 ───────────────────────────────────────────────
+        # ── 4. 生成报告（A1：支持服务端缓存，scan_results/ast_results 可选）────
         types.Tool(
             name="generate_impact_report",
             description=(
-                "将 scan_patterns 和 analyze_python_ast 的结果聚合成结构化 Markdown 影响分析报告。"
-                "在完成扫描后调用此工具生成最终报告。"
+                "将扫描结果聚合成结构化 Markdown 影响分析报告。"
+                "若不传 scan_results/ast_results，自动使用该 project_path 的最近一次扫描缓存。"
+                "推荐工作流：先调用 scan_patterns 和/或 analyze_python_ast，再调用此工具生成报告。"
             ),
             inputSchema={
                 "type": "object",
-                "required": ["change_description", "project_path", "scan_results", "ast_results"],
+                "required": ["change_description", "project_path"],
                 "properties": {
                     "change_description": {
                         "type": "string",
@@ -167,13 +161,32 @@ async def list_tools() -> list[types.Tool]:
                     "scan_results": {
                         "type": "array",
                         "items": {"type": "object"},
-                        "description": "scan_patterns 返回的结果",
+                        "description": "scan_patterns 返回的结果，不传则自动使用该 project_path 的缓存",
                     },
                     "ast_results": {
                         "type": "array",
                         "items": {"type": "object"},
-                        "description": "analyze_python_ast 返回的结果",
+                        "description": "analyze_python_ast 返回的结果，不传则自动使用该 project_path 的缓存",
                     },
+                },
+            },
+        ),
+
+        # ── 5. 调用链追踪（A3）────────────────────────────────────────
+        types.Tool(
+            name="trace_callers",
+            description=(
+                "找出项目中所有直接调用指定函数的函数和文件。"
+                "适合回答「改了函数 X，哪些地方会受影响？」"
+                "返回结果包含调用位置的文件、行号、所在函数名和置信度。"
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["project_path", "function_name"],
+                "properties": {
+                    "project_path": {"type": "string", "description": "Python 项目根目录绝对路径"},
+                    "function_name": {"type": "string", "description": "要追踪的函数名，如 'get_eq_partition'"},
+                    "exclude_dirs": {"type": "array", "items": {"type": "string"}, "description": "排除目录，不传则使用默认排除列表，传 [] 则不排除任何目录"},
                 },
             },
         ),
@@ -191,24 +204,39 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
 
 async def _dispatch(name: str, args: dict[str, Any]) -> str:
     if name == "scan_patterns":
+        project_path = args["project_path"]
+        # B4：用 "key" in args 区分"未传"和"传了空列表"，避免 [] or None 静默覆盖
+        extensions   = args["extensions"]   if "extensions"   in args else None
+        exclude_dirs = args["exclude_dirs"] if "exclude_dirs" in args else None
+        max_results  = args.get("max_results", 2000)
+
         results = scan(
-            project_path=args["project_path"],
+            project_path=project_path,
             patterns=args["patterns"],
-            extensions=args.get("extensions") or None,
-            exclude_dirs=args.get("exclude_dirs") or None,
+            extensions=extensions,
+            exclude_dirs=exclude_dirs,
+            max_results=max_results,
         )
+        _cache_set(project_path, "scan_results", results)
         return json.dumps(results, ensure_ascii=False, indent=2)
 
     elif name == "analyze_python_ast":
+        project_path = args["project_path"]
+        exclude_dirs = args["exclude_dirs"] if "exclude_dirs" in args else None
+
         results = analyze_project(
-            project_path=args["project_path"],
+            project_path=project_path,
+            # 空列表与 None 对 analyze_file 语义相同（set([]) == set(None or [])），
+            # 用 or None 简化，有意为之，不是 bug
             symbols=args.get("symbols") or None,
             field_names=args.get("field_names") or None,
             string_values=args.get("string_values") or None,
             call_names=args.get("call_names") or None,
             import_names=args.get("import_names") or None,
-            exclude_dirs=args.get("exclude_dirs") or None,
+            exclude_dirs=exclude_dirs,
+            max_results=args.get("max_results", 2000),   # 设计6：与 scan_patterns 对称
         )
+        _cache_set(project_path, "ast_results", results)
         return json.dumps(results, ensure_ascii=False, indent=2)
 
     elif name == "get_code_context":
@@ -219,12 +247,29 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         )
 
     elif name == "generate_impact_report":
+        project_path = args["project_path"]
+        # 问题1修复：用 "key" in args 区分"未传"和"传了空列表"，避免 [] or cache 静默覆盖
+        cached = _cache_get(project_path)
+        scan_results = args["scan_results"] if "scan_results" in args else cached["scan_results"]
+        ast_results  = args["ast_results"]  if "ast_results"  in args else cached["ast_results"]
         return build_report(
             change_description=args["change_description"],
-            project_path=args["project_path"],
-            scan_results=args["scan_results"],
-            ast_results=args["ast_results"],
+            project_path=project_path,
+            scan_results=scan_results,
+            ast_results=ast_results,
         )
+
+    elif name == "trace_callers":
+        project_path  = args["project_path"]
+        function_name = args["function_name"]
+        exclude_dirs  = args["exclude_dirs"] if "exclude_dirs" in args else None
+
+        results = trace_callers(
+            project_path=project_path,
+            function_name=function_name,
+            exclude_dirs=exclude_dirs,
+        )
+        return json.dumps(results, ensure_ascii=False, indent=2)
 
     return f"未知工具: {name}"
 
