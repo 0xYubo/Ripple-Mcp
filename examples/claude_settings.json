@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "field-impact": {
+      "command": "uvx",
+      "args": ["field-impact-mcp"],
+      "env": {}
+    }
+  }
+}
