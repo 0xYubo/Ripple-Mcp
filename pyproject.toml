@@ -9,12 +9,17 @@ description = "Field-level semantic impact analysis for Claude Code — see the 
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-keywords = ["mcp", "code-analysis", "impact-analysis", "ast", "claude", "ripple", "semantic"]
+keywords = ["mcp", "mcp-server", "code-analysis", "impact-analysis", "ast", "claude", "claude-code", "ripple", "semantic", "field-impact"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
     "mcp>=1.0.0,<2.0.0",
