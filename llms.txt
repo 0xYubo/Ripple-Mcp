@@ -57,7 +57,7 @@
 
 ```bash
 # 源码安装（当前推荐，PyPI 版本待发布）
-git clone https://github.com/ybmyb/Ripple-Mcp.git
+git clone https://github.com/0xYubo/Ripple-Mcp.git
 cd Ripple-Mcp
 pip install -e .
 claude mcp add ripple -s user \
@@ -74,5 +74,5 @@ claude mcp add ripple -s user \
 
 ## 项目地址
 
-- GitHub: https://github.com/ybmyb/Ripple-Mcp
+- GitHub: https://github.com/0xYubo/Ripple-Mcp
 - License: MIT

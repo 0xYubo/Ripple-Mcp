@@ -39,7 +39,7 @@ claude mcp add ripple -s user -- uvx ripple-mcp
 ### 方式二：从源码安装（当前推荐）
 
 ```bash
-git clone https://github.com/ybmyb/Ripple-Mcp.git
+git clone https://github.com/0xYubo/Ripple-Mcp.git
 cd Ripple-Mcp
 pip install -e .
 claude mcp add ripple -s user \
@@ -230,7 +230,7 @@ claude mcp add ripple -s user \
 ## 开发
 
 ```bash
-git clone https://github.com/ybmyb/Ripple-Mcp.git
+git clone https://github.com/0xYubo/Ripple-Mcp.git
 cd Ripple-Mcp
 pip install -e .
 pytest tests/ -v
@@ -240,4 +240,4 @@ pytest tests/ -v
 
 ## License
 
-MIT © [ybmyb](https://github.com/ybmyb)
+MIT © [0xYubo](https://github.com/0xYubo)
