@@ -53,18 +53,138 @@ pip install -e .
 
 **Claude Code 集成（MCP 配置）：**
 
+```bash
+# 方式一：命令行一键添加（推荐，-s user 表示全局可用）
+claude mcp add ripple -s user -- ripple-mcp
+```
+
 ```json
+// 方式二：手动编辑 MCP 配置文件
 {
   "mcpServers": {
-    "field-impact": {
-      "command": "python",
-      "args": ["-m", "ripple_mcp"]
+    "ripple": {
+      "command": "ripple-mcp"
     }
   }
 }
 ```
 
-配置完成后，在对话中自然描述变更场景，Claude 会自动调度合适的工具完成分析。
+> `ripple-mcp` 是 `pip install -e .` 注册的命令行入口，等价于 `python -m field_impact_mcp`。
+
+配置完成后重启 Claude Code 即可生效。
+
+---
+
+### 使用方式
+
+无需手动调用任何工具——在 Claude Code 对话中**用自然语言描述变更意图**，Claude 会自动编排下面的工具完成分析。
+
+**字段类型变更**
+```
+分析「把 all_check 表的 survey_status_today 字段从 INT 改为 VARCHAR」
+对 /path/to/backend 的影响范围
+```
+
+**坐标语义变更**
+```
+如果把机台坐标 x/y 从左上角改为中心点，
+/path/to/project 里哪些地方需要修改？
+```
+
+**函数重命名**
+```
+把 get_eq_partition 重命名为 get_machine_partition，
+/path/to/backend 里有多少个调用点？
+```
+
+**API 路径变更**
+```
+/api/external/apiKey/refresh 改为 /api/external/api-keys，
+哪些前端文件引用了旧路径？
+```
+
+**推荐工作流**（Claude 自动执行，也可手动指定）：
+
+```
+描述变更意图
+  → scan_patterns + analyze_python_ast（并行扫描）
+  → get_code_context（对可疑命中确认上下文）
+  → generate_impact_report（生成结构化影响报告）
+```
+
+---
+
+### MCP 工具参数说明
+
+#### `scan_patterns` — 通用 pattern 扫描
+
+接受任意正则表达式，支持所有语言和文件类型。
+
+```json
+{
+  "project_path": "/path/to/project",
+  "patterns": ["machine\\.x", "survey_status_today", "/api/external/"],
+  "extensions": [".py", ".ts", ".tsx", ".sql"],
+  "max_results": 2000
+}
+```
+
+返回：`[{file, line, code, patterns, confidence}]`
+
+#### `analyze_python_ast` — Python AST 精确分析
+
+比 grep 更精确，区分访问方式，标注所在函数。
+
+```json
+{
+  "project_path": "/path/to/backend",
+  "field_names":   ["x", "y", "survey_status_today"],
+  "string_values": ["success", "failed"],
+  "call_names":    ["get_eq_partition"],
+  "import_names":  ["plogen_tools"]
+}
+```
+
+`kind` 与置信度对应：
+
+| kind | 说明 | confidence |
+|---|---|---|
+| `attr_access` | `obj.field` | high |
+| `subscript_access` | `obj['field']` | high |
+| `get_call` | `obj.get('field')` | high |
+| `call` | 函数 / 方法调用 | medium |
+| `import` / `import_from` | 导入 | medium |
+| `type_annotation` | 类型注解 | low |
+
+#### `trace_callers` — 调用链追踪
+
+```json
+{
+  "project_path": "/path/to/backend",
+  "function_name": "get_eq_partition"
+}
+```
+
+#### `get_code_context` — 代码上下文
+
+```json
+{
+  "file_path": "/path/to/file.py",
+  "line_number": 254,
+  "context_lines": 8
+}
+```
+
+#### `generate_impact_report` — 生成影响报告
+
+先调用 `scan_patterns` / `analyze_python_ast`（结果自动缓存），再调用此工具只传 `change_description` 即可。
+
+```json
+{
+  "change_description": "将 survey_status_today 字段从 INT 改为 VARCHAR(16)",
+  "project_path": "/path/to/project"
+}
+```
 
 ---
 
@@ -126,18 +246,138 @@ pip install -e .
 
 **Claude Code Integration:**
 
+```bash
+# Option 1: one-liner via CLI (recommended, -s user = available in all projects)
+claude mcp add ripple -s user -- ripple-mcp
+```
+
 ```json
+// Option 2: edit the MCP config manually
 {
   "mcpServers": {
-    "field-impact": {
-      "command": "python",
-      "args": ["-m", "ripple_mcp"]
+    "ripple": {
+      "command": "ripple-mcp"
     }
   }
 }
 ```
 
-Once integrated, describe your change scenario in natural language — Claude automatically orchestrates the appropriate tools.
+> `ripple-mcp` is the console entry point registered by `pip install -e .`, equivalent to `python -m field_impact_mcp`.
+
+Restart Claude Code after configuring.
+
+---
+
+### Usage
+
+No manual tool calls needed — just **describe your change intent in natural language** inside Claude Code, and Claude orchestrates the tools below automatically.
+
+**Field type change**
+```
+Analyze the impact of changing the survey_status_today column
+of the all_check table from INT to VARCHAR on /path/to/backend
+```
+
+**Coordinate semantics change**
+```
+If machine coordinates x/y change from top-left to center,
+which places in /path/to/project need updating?
+```
+
+**Function rename**
+```
+Rename get_eq_partition to get_machine_partition —
+how many call sites exist in /path/to/backend?
+```
+
+**API path change**
+```
+/api/external/apiKey/refresh becomes /api/external/api-keys —
+which frontend files reference the old path?
+```
+
+**Recommended workflow** (orchestrated by Claude automatically):
+
+```
+Describe the change intent
+  → scan_patterns + analyze_python_ast  (parallel scan)
+  → get_code_context                    (confirm suspicious hits)
+  → generate_impact_report              (structured impact report)
+```
+
+---
+
+### MCP Tool Reference
+
+#### `scan_patterns` — universal pattern scan
+
+Accepts any regex; works across all languages and file types.
+
+```json
+{
+  "project_path": "/path/to/project",
+  "patterns": ["machine\\.x", "survey_status_today", "/api/external/"],
+  "extensions": [".py", ".ts", ".tsx", ".sql"],
+  "max_results": 2000
+}
+```
+
+Returns: `[{file, line, code, patterns, confidence}]`
+
+#### `analyze_python_ast` — precise Python AST analysis
+
+More accurate than grep — distinguishes access kinds and annotates the enclosing function.
+
+```json
+{
+  "project_path": "/path/to/backend",
+  "field_names":   ["x", "y", "survey_status_today"],
+  "string_values": ["success", "failed"],
+  "call_names":    ["get_eq_partition"],
+  "import_names":  ["plogen_tools"]
+}
+```
+
+`kind` → confidence mapping:
+
+| kind | Meaning | confidence |
+|---|---|---|
+| `attr_access` | `obj.field` | high |
+| `subscript_access` | `obj['field']` | high |
+| `get_call` | `obj.get('field')` | high |
+| `call` | function / method call | medium |
+| `import` / `import_from` | import | medium |
+| `type_annotation` | type annotation | low |
+
+#### `trace_callers` — call chain tracking
+
+```json
+{
+  "project_path": "/path/to/backend",
+  "function_name": "get_eq_partition"
+}
+```
+
+#### `get_code_context` — code context
+
+```json
+{
+  "file_path": "/path/to/file.py",
+  "line_number": 254,
+  "context_lines": 8
+}
+```
+
+#### `generate_impact_report` — impact report
+
+Call `scan_patterns` / `analyze_python_ast` first (results are cached server-side), then pass only `change_description`.
+
+```json
+{
+  "change_description": "Change survey_status_today from INT to VARCHAR(16)",
+  "project_path": "/path/to/project"
+}
+```
 
 ---
 
