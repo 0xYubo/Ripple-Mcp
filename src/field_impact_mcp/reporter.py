@@ -1,110 +1,120 @@
 """
 将扫描结果聚合成结构化 Markdown 报告。
+设计8：消费 scan/analyze_project 的结构化返回（{total_found, truncated, files}），
+       不再有 __truncated__ 哨兵；兼容旧平铺 list 输入（Claude 手工构造参数时）。
 """
 from __future__ import annotations
 
-from collections import defaultdict
-from pathlib import Path
 from typing import Any
 
+from ._utils import to_relative
 
-def _relative(file_path: str, project_path: str) -> str:
-    # Bug 6 修复：用 Path.relative_to() 替换 startswith，
-    # 避免 "/foo" 错误命中 "/foobar/x.py"
-    try:
-        return str(Path(file_path).relative_to(project_path))
-    except ValueError:
-        return file_path
+
+def _normalize(results: Any, project_path: str) -> dict[str, Any]:
+    """把输入统一成 {total_found, truncated, files} 结构。
+    - 新格式 dict：原样返回
+    - 旧平铺 list：按文件分组（过滤遗留 __truncated__ 哨兵）
+    - None / 空：空结构
+    """
+    if isinstance(results, dict) and "files" in results:
+        return results
+    empty = {"total_found": 0, "returned": 0, "truncated": False, "files": []}
+    if not results:
+        return empty
+    if isinstance(results, list):
+        truncated = any(h.get("file") == "__truncated__" for h in results)
+        flat = sorted(
+            (h for h in results if h.get("file") != "__truncated__"),
+            key=lambda h: (h.get("file", ""), h.get("line", 0)),
+        )
+        files: list[dict] = []
+        for h in flat:
+            rel = to_relative(h.get("file", ""), project_path)
+            if not files or files[-1]["file"] != rel:
+                files.append({"file": rel, "hits": []})
+            files[-1]["hits"].append(h)
+        return {"total_found": len(flat), "returned": len(flat), "truncated": truncated, "files": files}
+    return empty
+
+
+def _md_escape(text: str) -> str:
+    """Bug 3/4：转义 |、换行和反引号，防止 Markdown 表格错位。"""
+    return (
+        text.replace("|", "｜")
+        .replace("\n", " ").replace("\r", "")
+        .replace("`", "'")
+    )
 
 
 def build_report(
     change_description: str,
     project_path: str,
-    scan_results: list[dict[str, Any]],
-    ast_results: list[dict[str, Any]],
+    scan_results: Any,
+    ast_results: Any,
 ) -> str:
+    scan = _normalize(scan_results, project_path)
+    ast = _normalize(ast_results, project_path)
+
     lines: list[str] = []
     lines.append("# 字段影响分析报告\n")
     lines.append(f"**变更描述**：{change_description}\n")
     lines.append(f"**项目路径**：`{project_path}`\n")
-    # 问题1：对 scan_results 和 ast_results 都排除 __truncated__ 哨兵再计数
-    scan_count = sum(1 for h in scan_results if h.get("file") != "__truncated__")
-    ast_count  = sum(1 for h in ast_results  if h.get("file") != "__truncated__")
-    lines.append(f"**扫描命中**：{scan_count} 处（grep）｜{ast_count} 处（AST）\n")
+    lines.append(f"**扫描命中**：{scan['total_found']} 处（grep）｜{ast['total_found']} 处（AST）\n")
     lines.append("---\n")
 
     # ── AST 结果（精确，按文件分组）──
-    # 问题2：过滤哨兵，防止 __truncated__ 条目渲染成表格行
-    real_ast = [h for h in ast_results if h.get("file") != "__truncated__"]
-    if real_ast:
+    if ast["files"]:
         lines.append("## Python AST 分析（精确）\n")
-        by_file: dict[str, list] = defaultdict(list)
-        for h in real_ast:
-            by_file[h["file"]].append(h)
-
-        for fpath, hits in sorted(by_file.items()):
-            rel = _relative(fpath, project_path)
-            lines.append(f"### `{rel}`\n")
+        for f in ast["files"]:
+            lines.append(f"### `{f['file']}`\n")
             lines.append("| 行号 | 函数 | 访问方式 | 对象 | 字段 | 置信度 |")
             lines.append("|------|------|----------|------|------|--------|")
-            for h in hits:
+            for h in f["hits"]:
                 # Bug 3：ast.unparse 对位运算会输出 a | b，需转义 | 防止破坏表格
-                extra = h.get("extra", "").replace("|", "｜")
-                value = h["value"].replace("|", "｜")
+                extra = _md_escape(h.get("extra", ""))
+                value = _md_escape(h.get("value", ""))
                 lines.append(
-                    f"| {h['line']} | `{h['function']}` | {h['kind']} "
+                    f"| {h['line']} | `{h.get('function', '')}` | {h.get('kind', '')} "
                     f"| `{extra}` | `{value}` | {h.get('confidence', '-')} |"
                 )
             lines.append("")
 
     # ── Grep 结果（多语言，AST 未覆盖部分）──
-    ast_keys = {(h["file"], h["line"]) for h in ast_results}
-    extra_scan = [
-        h for h in scan_results
-        if (h["file"], h["line"]) not in ast_keys and h.get("file") != "__truncated__"
-    ]
+    ast_keys = {(f["file"], h["line"]) for f in ast["files"] for h in f["hits"]}
+    extra_count = 0
+    grep_sections: list[str] = []
+    for f in scan["files"]:
+        hits = [h for h in f["hits"] if (f["file"], h["line"]) not in ast_keys]
+        if not hits:
+            continue
+        extra_count += len(hits)
+        grep_sections.append(f"### `{f['file']}`\n")
+        grep_sections.append("| 行号 | 命中 pattern | 代码片段 |")
+        grep_sections.append("|------|-------------|----------|")
+        for h in hits:
+            code = _md_escape(h.get("code", "").strip()[:120])
+            pats = ", ".join(f"`{p}`" for p in h.get("patterns", []))
+            grep_sections.append(f"| {h['line']} | {pats} | `{code}` |")
+        grep_sections.append("")
 
-    if extra_scan:
-        lines.append("## Grep 扫描结果（非 AST 覆盖部分）\n")  # 设计7：改为中性标题，Python 文件也可能出现在此
-        by_file2: dict[str, list] = defaultdict(list)
-        for h in extra_scan:
-            by_file2[h["file"]].append(h)
+    if grep_sections:
+        lines.append("## Grep 扫描结果（非 AST 覆盖部分）\n")  # 设计7：中性标题，Python 文件也可能出现在此
+        lines.extend(grep_sections)
 
-        for fpath, hits in sorted(by_file2.items()):
-            rel = _relative(fpath, project_path)
-            lines.append(f"### `{rel}`\n")
-            lines.append("| 行号 | 命中 pattern | 代码片段 |")
-            lines.append("|------|-------------|----------|")
-            for h in hits:
-                # Bug 3/4：转义 |（管道符）、\n（换行）和 `（反引号），防止 Markdown 表格错位
-                code = (
-                    h.get("code", "").strip()[:120]
-                    .replace("|", "｜")
-                    .replace("\n", " ").replace("\r", "")
-                    .replace("`", "'")
-                )
-                pats = ", ".join(f"`{p}`" for p in h.get("patterns", []))
-                lines.append(f"| {h['line']} | {pats} | `{code}` |")
-            lines.append("")
-
-    # 截断提示（问题2：同时检查 scan 和 ast 两侧的截断哨兵）
-    # scan 哨兵用 "code" 字段，AST 哨兵用 "value" 字段，兼容两种
-    for result_list in (scan_results, ast_results):
-        sentinel = next((h for h in result_list if h.get("file") == "__truncated__"), None)
-        if sentinel:
-            msg = sentinel.get("value") or sentinel.get("code", "")
-            lines.append(f"> ⚠️ {msg}\n")
-            break
+    # ── 截断提示 ──
+    for label, r in (("grep", scan), ("AST", ast)):
+        if r["truncated"]:
+            lines.append(
+                f"> ⚠️ {label} 结果已截断（共 {r['total_found']} 处，仅显示前 {r['returned']} 条）。"
+                f"请缩小搜索范围或增大 max_results。\n"
+            )
 
     # ── 摘要统计 ──
-    all_files = {
-        h["file"] for h in scan_results + ast_results
-        if h.get("file") not in (None, "__truncated__")
-    }
+    all_files = {f["file"] for f in scan["files"]} | {f["file"] for f in ast["files"]}
     lines.append("## 摘要\n")
     lines.append(f"- 受影响文件共 **{len(all_files)}** 个")
-    lines.append(f"- AST 精确命中 **{ast_count}** 处")
-    lines.append(f"- Grep 额外命中 **{len(extra_scan)}** 处")
+    lines.append(f"- AST 精确命中 **{ast['total_found']}** 处")
+    lines.append(f"- Grep 额外命中 **{extra_count}** 处")
     lines.append("")
     lines.append("> 以上结果为静态扫描，建议人工确认每处是否真正耦合到字段语义。")
 

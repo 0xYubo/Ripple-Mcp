@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from ._utils import validate_project_path
+from ._utils import to_relative, validate_project_path
 
 _DEFAULT_EXCLUDE = {
     ".venv", "venv", "__pycache__", "node_modules",
@@ -266,10 +266,17 @@ def analyze_project(
     call_names: list[str] | None = None,
     import_names: list[str] | None = None,
     exclude_dirs: list[str] | None = None,
-    max_results: int = 2000,
-) -> list[dict[str, Any]]:
+    max_results: int = 500,
+) -> dict[str, Any]:
     """递归分析整个项目的所有 .py 文件（A2：ThreadPoolExecutor 并发）。
     设计6：max_results 上限与 scan_patterns 对称，防止大项目打爆 context window。
+    设计8：返回结构化 dict（替代旧的平铺 list + __truncated__ 哨兵）：
+        {
+          "total_found": 总命中数,
+          "returned": 实际返回数,
+          "truncated": 是否被 max_results 截断,
+          "files": [{"file": 相对路径, "hits": [{line, kind, value, extra, function, confidence}]}]
+        }
     """
     validate_project_path(project_path)   # 问题3：复用共享校验，消除与 scanner.py 的重复
 
@@ -300,32 +307,49 @@ def analyze_project(
 
     all_hits.sort(key=lambda h: (h["file"], h["line"]))
 
-    # 设计6：截断保护，超出上限时附加提示条目
-    if len(all_hits) > max_results:
+    total_found = len(all_hits)
+    truncated = total_found > max_results
+    if truncated:
         all_hits = all_hits[:max_results]
-        all_hits.append({
-            "file": "__truncated__",
-            "line": 0,
-            "col": 0,
-            "kind": "__truncated__",
-            "value": f"结果已截断，仅显示前 {max_results} 条。请缩小搜索目标范围或增大 max_results。",
-            "extra": "",
-            "function": "",
-            "confidence": "low",
+
+    # 设计8：按文件聚合 + 相对路径；col 对影响分析无用，不再输出，省 token
+    files: list[dict] = []
+    for hit in all_hits:
+        rel = to_relative(hit["file"], project_path)
+        if not files or files[-1]["file"] != rel:
+            files.append({"file": rel, "hits": []})
+        files[-1]["hits"].append({
+            "line":       hit["line"],
+            "kind":       hit["kind"],
+            "value":      hit["value"],
+            "extra":      hit["extra"],
+            "function":   hit["function"],
+            "confidence": hit["confidence"],
         })
 
-    return all_hits
+    return {
+        "total_found": total_found,
+        "returned": len(all_hits),
+        "truncated": truncated,
+        "files": files,
+    }
 
 
 def trace_callers(
     project_path: str,
     function_name: str,
     exclude_dirs: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    """A3：找出所有直接调用 function_name 的函数和文件。"""
-    hits = analyze_project(
+) -> dict[str, Any]:
+    """A3：找出所有直接调用 function_name 的函数和文件。返回结构与 analyze_project 相同。"""
+    result = analyze_project(
         project_path=project_path,
         call_names=[function_name],
         exclude_dirs=exclude_dirs,
     )
-    return [h for h in hits if h["kind"] == "call"]
+    files = []
+    for f in result["files"]:
+        hits = [h for h in f["hits"] if h["kind"] == "call"]
+        if hits:
+            files.append({"file": f["file"], "hits": hits})
+    n = sum(len(f["hits"]) for f in files)
+    return {"total_found": n, "returned": n, "truncated": result["truncated"], "files": files}

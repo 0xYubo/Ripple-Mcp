@@ -125,11 +125,24 @@ claude mcp add ripple -s user -- ripple-mcp
   "project_path": "/path/to/project",
   "patterns": ["machine\\.x", "survey_status_today", "/api/external/"],
   "extensions": [".py", ".ts", ".tsx", ".sql"],
-  "max_results": 2000
+  "max_results": 500
 }
 ```
 
-返回：`[{file, line, code, patterns, confidence}]`
+返回（按文件聚合，`file` 为相对 `project_path` 的路径）：
+
+```json
+{
+  "engine": "rg",
+  "total_found": 12,
+  "returned": 12,
+  "truncated": false,
+  "files": [{"file": "pkg/a.py", "hits": [{"line": 2, "code": "...", "patterns": ["..."], "confidence": "low"}]}]
+}
+```
+
+`truncated: true` 时表示命中数超过 `max_results`，可增大后重试。
+`analyze_python_ast` / `trace_callers` 返回相同的聚合结构（hits 内为 `{line, kind, value, extra, function, confidence}`）。
 
 #### `analyze_python_ast` — Python AST 精确分析
 
@@ -169,11 +182,14 @@ claude mcp add ripple -s user -- ripple-mcp
 
 ```json
 {
-  "file_path": "/path/to/file.py",
+  "file_path": "pkg/a.py",
   "line_number": 254,
-  "context_lines": 8
+  "context_lines": 8,
+  "project_path": "/path/to/project"
 }
 ```
+
+`file_path` 可直接使用扫描结果中的相对路径（需同时传 `project_path`），也可传绝对路径。
 
 #### `generate_impact_report` — 生成影响报告
 
@@ -318,11 +334,24 @@ Accepts any regex; works across all languages and file types.
   "project_path": "/path/to/project",
   "patterns": ["machine\\.x", "survey_status_today", "/api/external/"],
   "extensions": [".py", ".ts", ".tsx", ".sql"],
-  "max_results": 2000
+  "max_results": 500
 }
 ```
 
-Returns: `[{file, line, code, patterns, confidence}]`
+Returns (grouped by file; `file` is relative to `project_path`):
+
+```json
+{
+  "engine": "rg",
+  "total_found": 12,
+  "returned": 12,
+  "truncated": false,
+  "files": [{"file": "pkg/a.py", "hits": [{"line": 2, "code": "...", "patterns": ["..."], "confidence": "low"}]}]
+}
+```
+
+When `truncated: true`, hits exceeded `max_results` — retry with a larger value.
+`analyze_python_ast` / `trace_callers` return the same grouped structure (hits contain `{line, kind, value, extra, function, confidence}`).
 
 #### `analyze_python_ast` — precise Python AST analysis
 
@@ -362,11 +391,14 @@ More accurate than grep — distinguishes access kinds and annotates the enclosi
 
 ```json
 {
-  "file_path": "/path/to/file.py",
+  "file_path": "pkg/a.py",
   "line_number": 254,
-  "context_lines": 8
+  "context_lines": 8,
+  "project_path": "/path/to/project"
 }
 ```
+
+`file_path` accepts the relative paths from scan results (pass `project_path` along), or an absolute path.
 
 #### `generate_impact_report` — impact report
 

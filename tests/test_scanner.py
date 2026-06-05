@@ -7,41 +7,67 @@ from field_impact_mcp.scanner import scan, get_context
 from field_impact_mcp.ast_analyzer import analyze_file, analyze_project
 
 
+def _flat(result: dict) -> list[dict]:
+    """设计8：把结构化返回展平成命中列表，方便断言。"""
+    return [h for f in result["files"] for h in f["hits"]]
+
+
 # ── scanner (通用 pattern) ──────────────────────────────────────────────
 
 def test_scan_field_access(tmp_path):
     f = tmp_path / "a.py"
     f.write_text("x = machine['x']\ny = machine.y\n")
     results = scan(str(tmp_path), [r"machine\['x'\]", r"machine\.y"], [".py"], [])
-    assert len(results) == 2
+    assert results["total_found"] == 2
+    assert len(_flat(results)) == 2
 
 
 def test_scan_string_literal(tmp_path):
     f = tmp_path / "b.py"
     f.write_text("status = 'success'\nif status == 'failed':\n    pass\n")
     results = scan(str(tmp_path), [r"'success'", r"'failed'"], [".py"], [])
-    assert len(results) == 2
+    assert results["total_found"] == 2
 
 
 def test_scan_function_call(tmp_path):
     f = tmp_path / "c.py"
     f.write_text("result = get_eq_partition(conn, x, y, map_id)\n")
     results = scan(str(tmp_path), [r"get_eq_partition\("], [".py"], [])
-    assert len(results) == 1
+    assert results["total_found"] == 1
 
 
 def test_scan_typescript(tmp_path):
     f = tmp_path / "d.ts"
     f.write_text("const x = machine.x;\nconst y = machine.y;\n")
     results = scan(str(tmp_path), [r"machine\.(x|y)"], [".ts"], [])
-    assert len(results) >= 1
+    assert results["total_found"] >= 1
 
 
 def test_scan_api_path(tmp_path):
     f = tmp_path / "e.py"
     f.write_text('url = "/api/external/apiKey/refresh"\n')
     results = scan(str(tmp_path), [r"/api/external/"], [".py"], [])
-    assert len(results) == 1
+    assert results["total_found"] == 1
+
+
+def test_scan_returns_relative_paths(tmp_path):
+    """设计8：结果中的 file 应为相对 project_path 的路径"""
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    (sub / "a.py").write_text("x = machine.x\n")
+    results = scan(str(tmp_path), [r"machine\.x"], [".py"], [])
+    assert results["files"][0]["file"] == "pkg/a.py"
+
+
+def test_scan_truncation_flag(tmp_path):
+    """设计8：超过 max_results 时设置 truncated 标志，不再有 __truncated__ 哨兵"""
+    f = tmp_path / "big.py"
+    f.write_text("\n".join(f"v{i} = machine.x" for i in range(10)))
+    results = scan(str(tmp_path), [r"machine\.x"], [".py"], [], max_results=3)
+    assert results["truncated"] is True
+    assert results["total_found"] == 10
+    assert results["returned"] == 3
+    assert len(_flat(results)) == 3
 
 
 def test_get_context(tmp_path):
@@ -226,8 +252,9 @@ def test_scan_multi_pattern_same_line(tmp_path):
     f = tmp_path / "e.py"
     f.write_text("machine_x = float(machine['x'])\n")
     results = scan(str(tmp_path), [r"machine_x", r"machine\['x'\]"], [".py"], [])
-    assert len(results) == 1
-    assert len(results[0]["patterns"]) == 2
+    hits = _flat(results)
+    assert len(hits) == 1
+    assert len(hits[0]["patterns"]) == 2
 
 
 def test_scan_invalid_pattern(tmp_path):
@@ -255,9 +282,11 @@ def test_trace_callers(tmp_path):
         "    return get_eq_partition(conn, 3, 4)\n"
     )
     results = trace_callers(str(tmp_path), "get_eq_partition")
-    assert len(results) == 2
-    assert all(r["kind"] == "call" for r in results)
-    assert all(r["value"] == "get_eq_partition" for r in results)
+    hits = _flat(results)
+    assert results["total_found"] == 2
+    assert len(hits) == 2
+    assert all(r["kind"] == "call" for r in hits)
+    assert all(r["value"] == "get_eq_partition" for r in hits)
 
 
 def test_ast_no_duplicate_name_ref(tmp_path):
@@ -374,19 +403,18 @@ def test_ast_import_from_exact_and_prefix_match(tmp_path):
 
 
 def test_reporter_relative_path_safe(tmp_path):
-    """Bug 6：_relative 不应把 /foo 路径错误匹配到 /foobar/x.py"""
-    from field_impact_mcp.reporter import _relative
-    import os
+    """Bug 6：to_relative 不应把 /foo 路径错误匹配到 /foobar/x.py"""
+    from field_impact_mcp._utils import to_relative
     # 构造 project_path = tmp_path/foo，file_path = tmp_path/foobar/x.py
     project = str(tmp_path / "foo")
     unrelated = str(tmp_path / "foobar" / "x.py")
-    result = _relative(unrelated, project)
+    result = to_relative(unrelated, project)
     # 应返回原始路径（无法 relative_to），不应返回 "bar/x.py"
     assert result == unrelated
 
 
-def test_reporter_scan_count_excludes_truncated_marker(tmp_path):
-    """新问题2：报告头的扫描命中数不应包含 __truncated__ 哨兵条目"""
+def test_reporter_legacy_flat_list_with_sentinel(tmp_path):
+    """设计8 向后兼容：旧平铺 list（含 __truncated__ 哨兵）传入 build_report 仍可正确解析"""
     from field_impact_mcp.reporter import build_report
     scan_results = [
         {"file": str(tmp_path / "a.py"), "line": 1, "code": "x = 1", "patterns": ["x"], "confidence": "low"},
@@ -394,6 +422,8 @@ def test_reporter_scan_count_excludes_truncated_marker(tmp_path):
     ]
     report = build_report("test", str(tmp_path), scan_results, [])
     assert "**扫描命中**：1 处" in report, "截断哨兵不应计入命中数"
+    assert "__truncated__" not in report
+    assert "已截断" in report, "旧哨兵应转换为截断提示"
 
 
 # ── 第四轮 bug 修复回归测试 ────────────────────────────────────────────
@@ -452,20 +482,20 @@ def test_ast_nested_tuple_unpack_as_assignment(tmp_path):
 
 
 def test_ast_max_results_truncation(tmp_path):
-    """设计6：analyze_project max_results 截断时返回上限条数 + 哨兵"""
+    """设计6/设计8：analyze_project max_results 截断时设置 truncated 标志，不再有哨兵"""
     from field_impact_mcp.ast_analyzer import analyze_project
     # 写 3 个文件，每个含 2 个命中，共 6 条；限制 max_results=3
     for i in range(3):
         (tmp_path / f"f{i}.py").write_text(f"x_{i} = obj.status\ny_{i} = obj.status\n")
     results = analyze_project(str(tmp_path), field_names=["status"], max_results=3)
-    # 应有 3 条真实结果 + 1 条哨兵
-    assert results[-1]["file"] == "__truncated__", "最后一条应为截断哨兵"
-    real = [r for r in results if r.get("file") != "__truncated__"]
-    assert len(real) == 3, f"期望 3 条真实结果，实际 {len(real)} 条"
+    assert results["truncated"] is True
+    assert results["total_found"] == 6
+    assert results["returned"] == 3
+    assert len(_flat(results)) == 3
 
 
 def test_reporter_ast_truncation_excluded_from_table(tmp_path):
-    """问题2：AST 结果被截断时，哨兵条目不应出现在报告表格中"""
+    """问题2/设计8：AST 旧格式哨兵条目不应出现在报告表格中，应转为截断提示"""
     from field_impact_mcp.reporter import build_report
     ast_results = [
         {"file": str(tmp_path / "a.py"), "line": 1, "kind": "attr_access",
@@ -475,5 +505,27 @@ def test_reporter_ast_truncation_excluded_from_table(tmp_path):
     ]
     report = build_report("test", str(tmp_path), [], ast_results)
     assert "__truncated__" not in report, "哨兵的 kind 不应出现在报告正文中"
-    assert "结果已截断" in report, "截断提示应出现在报告末尾"
+    assert "已截断" in report, "截断提示应出现在报告末尾"
     assert "**扫描命中**：0 处（grep）｜1 处（AST）" in report, "AST 命中数不应含哨兵"
+
+
+def test_reporter_new_structured_input(tmp_path):
+    """设计8：scan/analyze_project 新结构化返回直接传入 build_report"""
+    py_f = tmp_path / "c.py"
+    py_f.write_text("def fn(m):\n    return m.status\n")
+    scan_results = scan(str(tmp_path), [r"\.status"], [".py"], [])
+    ast_results = analyze_project(str(tmp_path), field_names=["status"])
+    report = build_report("status 字段重命名", str(tmp_path), scan_results, ast_results)
+    assert "字段影响分析报告" in report
+    assert "attr_access" in report
+    assert "c.py" in report
+    # AST 已覆盖该行，grep 不应重复出现
+    assert "Grep 扫描结果" not in report
+
+
+def test_get_context_relative_path(tmp_path):
+    """设计8：get_context 支持相对路径 + project_path"""
+    f = tmp_path / "ctx2.py"
+    f.write_text("a\nb\nc\n")
+    ctx = get_context("ctx2.py", 2, 1, project_path=str(tmp_path))
+    assert ">>>" in ctx and "b" in ctx

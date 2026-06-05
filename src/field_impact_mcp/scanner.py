@@ -10,14 +10,15 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ._utils import validate_project_path
+from ._utils import to_relative, validate_project_path
 
 _DEFAULT_EXTENSIONS = [".py", ".ts", ".tsx", ".js", ".jsx"]
 _DEFAULT_EXCLUDE = [
     "node_modules", ".venv", "venv", "__pycache__",
     ".git", "dist", "build", ".next", ".mypy_cache",
 ]
-_MAX_RESULTS_DEFAULT = 2000
+# 设计8：默认上限从 2000 降到 500，防止单次调用打爆 context window；需要更多时显式传 max_results
+_MAX_RESULTS_DEFAULT = 500
 
 # B5：模块级缓存，避免每次 scan() 都 fork 进程
 _USE_RG: bool | None = None
@@ -103,11 +104,18 @@ def scan(
     extensions: list[str] | None = None,
     exclude_dirs: list[str] | None = None,
     max_results: int = _MAX_RESULTS_DEFAULT,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """
     核心扫描函数：接受任意正则 pattern 列表，返回所有命中位置。
     B3：同一行匹配多个 pattern 时，合并到 patterns 列表而非丢弃。
-    B10：结果按 (file, line) 排序，最多返回 max_results 条。
+    设计8：返回结构化 dict（替代旧的平铺 list + __truncated__ 哨兵）：
+        {
+          "engine": "rg" | "grep",
+          "total_found": 总命中数,
+          "returned": 实际返回数,
+          "truncated": 是否被 max_results 截断,
+          "files": [{"file": 相对路径, "hits": [{line, code, patterns, confidence}]}]
+        }
     """
     validate_project_path(project_path)
     _validate_patterns(patterns)
@@ -130,28 +138,50 @@ def scan(
                 if pat not in seen[key]["patterns"]:
                     seen[key]["patterns"].append(pat)
 
-    results = sorted(seen.values(), key=lambda h: (h["file"], h["line"]))
+    flat = sorted(seen.values(), key=lambda h: (h["file"], h["line"]))
+    total_found = len(flat)
+    truncated = total_found > max_results
+    if truncated:
+        flat = flat[:max_results]
 
-    # B10：截断并附加提示
-    if len(results) > max_results:
-        results = results[:max_results]
-        results.append({
-            "file": "__truncated__",
-            "line": 0,
-            "code": f"结果已截断，仅显示前 {max_results} 条。请缩小 pattern 范围或增大 max_results。",
-            "patterns": [],
-            "confidence": "low",
+    # 设计8：按文件聚合 + 相对路径，文件名只出现一次，省 token
+    files: list[dict] = []
+    for hit in flat:
+        rel = to_relative(hit["file"], project_path)
+        if not files or files[-1]["file"] != rel:
+            files.append({"file": rel, "hits": []})
+        files[-1]["hits"].append({
+            "line": hit["line"],
+            "code": hit["code"],
+            "patterns": hit["patterns"],
+            "confidence": hit["confidence"],
         })
 
-    return results
+    return {
+        "engine": "rg" if use_rg else "grep",
+        "total_found": total_found,
+        "returned": len(flat),
+        "truncated": truncated,
+        "files": files,
+    }
 
 
-def get_context(file_path: str, line_number: int, context_lines: int = 6) -> str:
-    """返回指定行前后 context_lines 行的代码。"""
+def get_context(
+    file_path: str,
+    line_number: int,
+    context_lines: int = 6,
+    project_path: str | None = None,
+) -> str:
+    """返回指定行前后 context_lines 行的代码。
+    设计8：扫描结果改为相对路径后，支持传 project_path 解析相对 file_path。
+    """
     if line_number < 1:
         return f"(行号必须 >= 1，收到: {line_number})"
+    path = Path(file_path)
+    if not path.is_absolute() and project_path:
+        path = Path(project_path) / path
     try:
-        lines = Path(file_path).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         if line_number > len(lines):
             return f"(行号 {line_number} 超出文件范围，文件共 {len(lines)} 行)"
         start = max(0, line_number - context_lines - 1)

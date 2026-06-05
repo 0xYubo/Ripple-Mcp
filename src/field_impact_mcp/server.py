@@ -22,23 +22,29 @@ server = Server("field-impact-mcp")
 # 新问题3修复：改用 OrderedDict 实现 LRU 驱逐（最近使用的留在末尾，超限淘汰头部），
 #             替代之前简单 FIFO（next(iter(_cache))）
 _CACHE_MAX = 20
-_cache: OrderedDict[str, dict[str, list]] = OrderedDict()
+# 设计8：缓存值改为结构化 dict（scan/analyze_project 的新返回格式），None 表示尚无缓存
+_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
 
-def _cache_set(project_path: str, key: str, value: list) -> None:
+def _cache_set(project_path: str, key: str, value: Any) -> None:
     if project_path in _cache:
         _cache.move_to_end(project_path)   # LRU：刚写入的移到末尾（最近使用）
     else:
         if len(_cache) >= _CACHE_MAX:
             _cache.popitem(last=False)     # 淘汰最久未使用的（头部）
-        _cache[project_path] = {"scan_results": [], "ast_results": []}
+        _cache[project_path] = {"scan_results": None, "ast_results": None}
     _cache[project_path][key] = value
 
 
-def _cache_get(project_path: str) -> dict[str, list]:
+def _cache_get(project_path: str) -> dict[str, Any]:
     if project_path in _cache:
         _cache.move_to_end(project_path)   # LRU：读取也更新位置
-    return _cache.get(project_path, {"scan_results": [], "ast_results": []})
+    return _cache.get(project_path, {"scan_results": None, "ast_results": None})
+
+
+# 设计8：MCP 返回用最紧凑 JSON（无缩进、无空格分隔符），相比 indent=2 大幅节省 token
+def _to_json(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
 @server.list_tools()
@@ -54,6 +60,8 @@ async def list_tools() -> list[types.Tool]:
                 "配置项、API 路径、SQL 字段名、注释、枚举值等任何内容。"
                 "当用户描述任何类型的代码变更并想知道影响范围时，调用此工具。"
                 "由 Claude 根据变更描述决定要搜什么 pattern，此工具只负责机械执行搜索。"
+                "返回按文件聚合的 JSON：{engine, total_found, returned, truncated, "
+                "files:[{file:相对路径, hits:[{line, code, patterns, confidence}]}]}。"
             ),
             inputSchema={
                 "type": "object",
@@ -87,8 +95,8 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "最大返回结果数，默认 2000",
-                        "default": 2000,
+                        "description": "最大返回结果数，默认 500；truncated=true 时可增大后重试",
+                        "default": 500,
                     },
                 },
             },
@@ -106,6 +114,8 @@ async def list_tools() -> list[types.Tool]:
                 "- call_names: 函数/方法调用名\n"
                 "- import_names: 导入的模块或符号名\n"
                 "每个命中都标注所在函数名、访问方式和置信度，适合需要精确上下文的场景。"
+                "返回按文件聚合的 JSON：{total_found, returned, truncated, "
+                "files:[{file:相对路径, hits:[{line, kind, value, extra, function, confidence}]}]}。"
             ),
             inputSchema={
                 "type": "object",
@@ -118,7 +128,7 @@ async def list_tools() -> list[types.Tool]:
                     "call_names":    {"type": "array", "items": {"type": "string"}, "description": "函数/方法调用名列表，如 ['get_eq_partition']"},
                     "import_names":  {"type": "array", "items": {"type": "string"}, "description": "导入符号/模块名列表，如 ['plogen_tools']"},
                     "exclude_dirs":  {"type": "array", "items": {"type": "string"}, "description": "排除目录，不传则使用默认排除列表，传 [] 则不排除任何目录"},
-                    "max_results":   {"type": "integer", "description": "最大返回结果数，默认 2000", "default": 2000},
+                    "max_results":   {"type": "integer", "description": "最大返回结果数，默认 500；truncated=true 时可增大后重试", "default": 500},
                 },
             },
         ),
@@ -134,9 +144,10 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "required": ["file_path", "line_number"],
                 "properties": {
-                    "file_path": {"type": "string", "description": "文件绝对路径"},
+                    "file_path": {"type": "string", "description": "文件路径；可传扫描结果中的相对路径（需同时传 project_path）或绝对路径"},
                     "line_number": {"type": "integer", "description": "目标行号（从 1 开始）"},
                     "context_lines": {"type": "integer", "description": "前后各显示行数，默认 6", "default": 6},
+                    "project_path": {"type": "string", "description": "项目根目录绝对路径；file_path 为相对路径时必传"},
                 },
             },
         ),
@@ -159,14 +170,12 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "project_path": {"type": "string"},
                     "scan_results": {
-                        "type": "array",
-                        "items": {"type": "object"},
-                        "description": "scan_patterns 返回的结果，不传则自动使用该 project_path 的缓存",
+                        "type": "object",
+                        "description": "scan_patterns 返回的结果（整个 JSON 对象），不传则自动使用该 project_path 的缓存",
                     },
                     "ast_results": {
-                        "type": "array",
-                        "items": {"type": "object"},
-                        "description": "analyze_python_ast 返回的结果，不传则自动使用该 project_path 的缓存",
+                        "type": "object",
+                        "description": "analyze_python_ast 返回的结果（整个 JSON 对象），不传则自动使用该 project_path 的缓存",
                     },
                 },
             },
@@ -178,7 +187,7 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "找出项目中所有直接调用指定函数的函数和文件。"
                 "适合回答「改了函数 X，哪些地方会受影响？」"
-                "返回结果包含调用位置的文件、行号、所在函数名和置信度。"
+                "返回按文件聚合的 JSON，每处命中含行号、所在函数名和置信度。"
             ),
             inputSchema={
                 "type": "object",
@@ -208,7 +217,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         # B4：用 "key" in args 区分"未传"和"传了空列表"，避免 [] or None 静默覆盖
         extensions   = args["extensions"]   if "extensions"   in args else None
         exclude_dirs = args["exclude_dirs"] if "exclude_dirs" in args else None
-        max_results  = args.get("max_results", 2000)
+        max_results  = args.get("max_results", 500)
 
         results = scan(
             project_path=project_path,
@@ -218,7 +227,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
             max_results=max_results,
         )
         _cache_set(project_path, "scan_results", results)
-        return json.dumps(results, ensure_ascii=False, indent=2)
+        return _to_json(results)
 
     elif name == "analyze_python_ast":
         project_path = args["project_path"]
@@ -234,21 +243,22 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
             call_names=args.get("call_names") or None,
             import_names=args.get("import_names") or None,
             exclude_dirs=exclude_dirs,
-            max_results=args.get("max_results", 2000),   # 设计6：与 scan_patterns 对称
+            max_results=args.get("max_results", 500),   # 设计6：与 scan_patterns 对称
         )
         _cache_set(project_path, "ast_results", results)
-        return json.dumps(results, ensure_ascii=False, indent=2)
+        return _to_json(results)
 
     elif name == "get_code_context":
         return get_context(
             file_path=args["file_path"],
             line_number=args["line_number"],
             context_lines=args.get("context_lines", 6),
+            project_path=args.get("project_path"),   # 设计8：支持相对路径解析
         )
 
     elif name == "generate_impact_report":
         project_path = args["project_path"]
-        # 问题1修复：用 "key" in args 区分"未传"和"传了空列表"，避免 [] or cache 静默覆盖
+        # 问题1修复：用 "key" in args 区分"未传"和"传了空值"，避免静默覆盖
         cached = _cache_get(project_path)
         scan_results = args["scan_results"] if "scan_results" in args else cached["scan_results"]
         ast_results  = args["ast_results"]  if "ast_results"  in args else cached["ast_results"]
@@ -269,7 +279,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
             function_name=function_name,
             exclude_dirs=exclude_dirs,
         )
-        return json.dumps(results, ensure_ascii=False, indent=2)
+        return _to_json(results)
 
     return f"未知工具: {name}"
 
