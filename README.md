@@ -46,6 +46,8 @@
 
 **环境要求：** Python 3.10+
 
+> 📦 尚未发布到 PyPI（`pip install ripple-mcp` 暂不可用），目前请通过源码安装：
+
 ```bash
 git clone https://github.com/0xYubo/Ripple-Mcp.git
 cd Ripple-Mcp
@@ -278,6 +280,8 @@ When you want to analyze the impact of "changing `machine.x/y` semantics" or "co
 ### Installation
 
 **Requirements:** Python 3.10+
+
+> 📦 Not yet published to PyPI (`pip install ripple-mcp` is not available yet) — install from source for now:
 
 ```bash
 git clone https://github.com/0xYubo/Ripple-Mcp.git
