@@ -272,7 +272,7 @@ def test_scan_invalid_path():
 
 
 def test_trace_callers(tmp_path):
-    """A3：trace_callers 找出调用指定函数的位置"""
+    """A3/A7：trace_callers 找出直接调用指定函数的位置（levels 结构）"""
     from field_impact_mcp.ast_analyzer import trace_callers
     f = tmp_path / "f.py"
     f.write_text(
@@ -282,11 +282,100 @@ def test_trace_callers(tmp_path):
         "    return get_eq_partition(conn, 3, 4)\n"
     )
     results = trace_callers(str(tmp_path), "get_eq_partition")
-    hits = _flat(results)
     assert results["total_found"] == 2
-    assert len(hits) == 2
-    assert all(r["kind"] == "call" for r in hits)
-    assert all(r["value"] == "get_eq_partition" for r in hits)
+    assert len(results["levels"]) == 1
+    callers = results["levels"][0]["callers"]
+    assert {c["caller_function"] for c in callers} == {"caller_a", "caller_b"}
+    assert all(c["callee"] == "get_eq_partition" for c in callers)
+    assert all(c["confidence"] == "high" for c in callers)
+
+
+def test_trace_callers_multi_depth(tmp_path):
+    """A7：depth=3 时 BFS 逐层上溯 target ← b ← c"""
+    from field_impact_mcp.ast_analyzer import trace_callers
+    f = tmp_path / "chain.py"
+    f.write_text(
+        "def target():\n    pass\n"
+        "def b():\n    return target()\n"
+        "def c():\n    return b()\n"
+    )
+    results = trace_callers(str(tmp_path), "target", depth=3)
+    assert len(results["levels"]) == 2, f"应有 2 层（c 之上没人调用），实际 {len(results['levels'])}"
+    assert results["levels"][0]["callers"][0]["caller_function"] == "b"
+    assert results["levels"][1]["callers"][0]["caller_function"] == "c"
+    assert results["levels"][1]["callers"][0]["callee"] == "b"
+    assert results["total_found"] == 2
+
+
+def test_trace_callers_confidence_grading(tmp_path):
+    """A7：foo(x) 直呼 → high；obj.foo() 方法名匹配 → medium"""
+    from field_impact_mcp.ast_analyzer import trace_callers
+    f = tmp_path / "conf.py"
+    f.write_text(
+        "def a(obj):\n    return foo(1)\n"
+        "def b(obj):\n    return obj.foo(2)\n"
+    )
+    results = trace_callers(str(tmp_path), "foo")
+    by_caller = {c["caller_function"]: c["confidence"] for c in results["levels"][0]["callers"]}
+    assert by_caller == {"a": "high", "b": "medium"}
+
+
+def test_trace_callers_recursion_no_loop(tmp_path):
+    """A7：递归函数 / 互相调用不应死循环（visited 去重）"""
+    from field_impact_mcp.ast_analyzer import trace_callers
+    f = tmp_path / "rec.py"
+    f.write_text(
+        "def target():\n    return helper()\n"
+        "def helper():\n    return target()\n"   # target ↔ helper 互调
+    )
+    results = trace_callers(str(tmp_path), "target", depth=5)
+    # 第 1 层：helper 调 target；第 2 层：target 调 helper，但 target 已 visited，不再扩展
+    assert len(results["levels"]) <= 2
+    assert results["total_found"] <= 2
+
+
+def test_find_definition_function_and_class(tmp_path):
+    """A8：find_definition 找到函数（带签名）、类、常量定义"""
+    from field_impact_mcp.ast_analyzer import find_definition
+    f = tmp_path / "defs.py"
+    f.write_text(
+        "DEFAULT_TTL = 30\n"
+        "class Machine:\n"
+        "    x = 0\n"
+        "    def move(self, dx: int) -> bool:\n"
+        "        local = 1\n"
+        "        return True\n"
+        "def move(speed):\n    pass\n"
+    )
+    r_func = find_definition(str(tmp_path), "move")
+    hits = _flat(r_func)
+    assert len(hits) == 2, f"方法 + 顶层函数共 2 处，实际 {len(hits)}"
+    parents = {h["parent"] for h in hits}
+    assert parents == {"Machine", "<module>"}
+    method = next(h for h in hits if h["parent"] == "Machine")
+    assert method["signature"] == "def move(self, dx: int) -> bool"
+
+    r_class = find_definition(str(tmp_path), "Machine")
+    assert _flat(r_class)[0]["kind"] == "class"
+
+    r_const = find_definition(str(tmp_path), "DEFAULT_TTL")
+    assert _flat(r_const)[0]["kind"] == "assignment"
+
+    # 函数体内局部变量不算定义
+    r_local = find_definition(str(tmp_path), "local")
+    assert r_local["total_found"] == 0
+
+
+def test_find_definition_class_attr(tmp_path):
+    """A8：类属性赋值记录为 assignment，parent 为类名"""
+    from field_impact_mcp.ast_analyzer import find_definition
+    f = tmp_path / "attr.py"
+    f.write_text("class M:\n    status: str = 'idle'\n")
+    r = find_definition(str(tmp_path), "status")
+    hits = _flat(r)
+    assert len(hits) == 1
+    assert hits[0]["kind"] == "assignment"
+    assert hits[0]["parent"] == "M"
 
 
 def test_ast_no_duplicate_name_ref(tmp_path):

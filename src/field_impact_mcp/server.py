@@ -12,7 +12,7 @@ import mcp.server.stdio
 import mcp.types as types
 from mcp.server import Server
 
-from .ast_analyzer import analyze_project, trace_callers
+from .ast_analyzer import analyze_project, find_definition, trace_callers
 from .reporter import build_report
 from .scanner import get_context, scan
 
@@ -181,13 +181,16 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
 
-        # ── 5. 调用链追踪（A3）────────────────────────────────────────
+        # ── 5. 调用链追踪（A3/A7：多层 BFS）──────────────────────────
         types.Tool(
             name="trace_callers",
             description=(
-                "找出项目中所有直接调用指定函数的函数和文件。"
-                "适合回答「改了函数 X，哪些地方会受影响？」"
-                "返回按文件聚合的 JSON，每处命中含行号、所在函数名和置信度。"
+                "BFS 逐层找出调用指定函数的函数：depth=1 为直接调用者，"
+                "depth=2 再找「调用者的调用者」，依此类推（上限 5 层）。"
+                "适合回答「改了函数 X，影响会波及到哪里？」"
+                "返回 {target, max_depth, total_found, truncated, "
+                "levels:[{depth, callers:[{file, line, caller_function, callee, confidence}]}]}。"
+                "confidence=high 表示 foo(x) 直呼；medium 表示 obj.foo() 按方法名匹配，可能是其他类的同名方法。"
             ),
             inputSchema={
                 "type": "object",
@@ -195,6 +198,29 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "project_path": {"type": "string", "description": "Python 项目根目录绝对路径"},
                     "function_name": {"type": "string", "description": "要追踪的函数名，如 'get_eq_partition'"},
+                    "depth": {"type": "integer", "description": "追踪层数，1=直接调用者，最大 5，默认 1", "default": 1},
+                    "exclude_dirs": {"type": "array", "items": {"type": "string"}, "description": "排除目录，不传则使用默认排除列表，传 [] 则不排除任何目录"},
+                    "max_results": {"type": "integer", "description": "所有层合计最大返回数，默认 500", "default": 500},
+                },
+            },
+        ),
+
+        # ── 6. 符号定义查找（A8）─────────────────────────────────────
+        types.Tool(
+            name="find_definition",
+            description=(
+                "找出符号在项目中的定义处：函数定义、类定义、模块级/类级赋值（常量、类属性）。"
+                "与 trace_callers 配对使用——先找定义看签名，再追调用链。"
+                "返回按文件聚合的 JSON：{total_found, returned, truncated, "
+                "files:[{file:相对路径, hits:[{line, kind, name, signature, parent}]}]}，"
+                "kind 为 function/class/assignment，parent 为所在类或函数（顶层为 <module>）。"
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["project_path", "name"],
+                "properties": {
+                    "project_path": {"type": "string", "description": "Python 项目根目录绝对路径"},
+                    "name": {"type": "string", "description": "要查找定义的符号名，如 'get_eq_partition'、'MachineModel'、'DEFAULT_TTL'"},
                     "exclude_dirs": {"type": "array", "items": {"type": "string"}, "description": "排除目录，不传则使用默认排除列表，传 [] 则不排除任何目录"},
                 },
             },
@@ -277,6 +303,17 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         results = trace_callers(
             project_path=project_path,
             function_name=function_name,
+            exclude_dirs=exclude_dirs,
+            depth=args.get("depth", 1),
+            max_results=args.get("max_results", 500),
+        )
+        return _to_json(results)
+
+    elif name == "find_definition":
+        exclude_dirs = args["exclude_dirs"] if "exclude_dirs" in args else None
+        results = find_definition(
+            project_path=args["project_path"],
+            name=args["name"],
             exclude_dirs=exclude_dirs,
         )
         return _to_json(results)

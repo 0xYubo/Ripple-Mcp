@@ -35,7 +35,8 @@
 |------|------|
 | `scan_patterns` | 通用正则扫描，支持任意语言 |
 | `analyze_python_ast` | 精准 Python AST 分析，区分属性访问 / 下标 / `.get()` |
-| `trace_callers` | 直接调用链追踪 |
+| `trace_callers` | 多层调用链追踪（BFS 上溯「调用者的调用者」，最多 5 层） |
+| `find_definition` | 符号定义查找（函数 / 类 / 常量，含签名与所在类） |
 | `generate_impact_report` | 语义变更影响的结构化 Markdown 报告 |
 | `get_code_context` | 带上下文的代码片段提取 |
 
@@ -142,7 +143,7 @@ claude mcp add ripple -s user -- ripple-mcp
 ```
 
 `truncated: true` 时表示命中数超过 `max_results`，可增大后重试。
-`analyze_python_ast` / `trace_callers` 返回相同的聚合结构（hits 内为 `{line, kind, value, extra, function, confidence}`）。
+`analyze_python_ast` / `find_definition` 返回相同的聚合结构（hits 内分别为 `{line, kind, value, extra, function, confidence}` / `{line, kind, name, signature, parent}`）。
 
 #### `analyze_python_ast` — Python AST 精确分析
 
@@ -169,14 +170,37 @@ claude mcp add ripple -s user -- ripple-mcp
 | `import` / `import_from` | 导入 | medium |
 | `type_annotation` | 类型注解 | low |
 
-#### `trace_callers` — 调用链追踪
+#### `trace_callers` — 多层调用链追踪
 
 ```json
 {
   "project_path": "/path/to/backend",
-  "function_name": "get_eq_partition"
+  "function_name": "get_eq_partition",
+  "depth": 3
 }
 ```
+
+`depth=1` 找直接调用者，`depth=2` 再找「调用者的调用者」，依此类推（上限 5 层）。返回：
+
+```json
+{
+  "target": "get_eq_partition", "max_depth": 3, "total_found": 5, "truncated": false,
+  "levels": [{"depth": 1, "callers": [{"file": "svc/a.py", "line": 12, "caller_function": "do_calc", "callee": "get_eq_partition", "confidence": "high"}]}]
+}
+```
+
+`confidence=high` 表示 `foo(x)` 直呼；`medium` 表示 `obj.foo()` 按方法名匹配，可能是其他类的同名方法。
+
+#### `find_definition` — 符号定义查找
+
+```json
+{
+  "project_path": "/path/to/backend",
+  "name": "get_eq_partition"
+}
+```
+
+返回函数 / 类 / 模块级与类级赋值的定义处，含签名（`def fn(a, b) -> int`）和所在类（`parent`）。与 `trace_callers` 配对使用：先看定义签名，再追调用链。
 
 #### `get_code_context` — 代码上下文
 
@@ -244,7 +268,8 @@ When you want to analyze the impact of "changing `machine.x/y` semantics" or "co
 |------|-------------|
 | `scan_patterns` | Universal regex-based pattern matching across any language |
 | `analyze_python_ast` | Precise Python AST analysis — distinguishes attribute access, subscript, and `.get()` |
-| `trace_callers` | Direct function call chain tracking |
+| `trace_callers` | Multi-level call chain tracking (BFS up to 5 levels of "callers of callers") |
+| `find_definition` | Symbol definition lookup (function / class / constant, with signature and enclosing class) |
 | `generate_impact_report` | Structured Markdown report of semantic change impact |
 | `get_code_context` | Contextual code snippet retrieval with surrounding lines |
 
@@ -351,7 +376,7 @@ Returns (grouped by file; `file` is relative to `project_path`):
 ```
 
 When `truncated: true`, hits exceeded `max_results` — retry with a larger value.
-`analyze_python_ast` / `trace_callers` return the same grouped structure (hits contain `{line, kind, value, extra, function, confidence}`).
+`analyze_python_ast` / `find_definition` return the same grouped structure (hits contain `{line, kind, value, extra, function, confidence}` / `{line, kind, name, signature, parent}` respectively).
 
 #### `analyze_python_ast` — precise Python AST analysis
 
@@ -378,14 +403,37 @@ More accurate than grep — distinguishes access kinds and annotates the enclosi
 | `import` / `import_from` | import | medium |
 | `type_annotation` | type annotation | low |
 
-#### `trace_callers` — call chain tracking
+#### `trace_callers` — multi-level call chain tracking
 
 ```json
 {
   "project_path": "/path/to/backend",
-  "function_name": "get_eq_partition"
+  "function_name": "get_eq_partition",
+  "depth": 3
 }
 ```
+
+`depth=1` finds direct callers; `depth=2` walks up to "callers of callers", etc. (max 5). Returns:
+
+```json
+{
+  "target": "get_eq_partition", "max_depth": 3, "total_found": 5, "truncated": false,
+  "levels": [{"depth": 1, "callers": [{"file": "svc/a.py", "line": 12, "caller_function": "do_calc", "callee": "get_eq_partition", "confidence": "high"}]}]
+}
+```
+
+`confidence=high` means a direct `foo(x)` call; `medium` means `obj.foo()` matched by method name — possibly a same-named method on another class.
+
+#### `find_definition` — symbol definition lookup
+
+```json
+{
+  "project_path": "/path/to/backend",
+  "name": "get_eq_partition"
+}
+```
+
+Returns definitions of functions / classes / module-level and class-level assignments, with signature (`def fn(a, b) -> int`) and enclosing class (`parent`). Pairs with `trace_callers`: inspect the signature first, then trace the call chain.
 
 #### `get_code_context` — code context
 

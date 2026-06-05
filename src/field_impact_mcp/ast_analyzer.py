@@ -335,21 +335,241 @@ def analyze_project(
     }
 
 
+# ── 调用索引（A7：trace_callers 多层 BFS 与 find_definition 共享）────────
+
+
+class _CallIndexVisitor(ast.NodeVisitor):
+    """单文件全量索引：收集所有调用点和所有定义（函数/类/模块级赋值）。
+
+    与 _UniversalVisitor 不同，本访问器不接受搜索目标——它无差别记录全部
+    调用与定义，供 trace_callers 的 BFS 在内存中逐层反查，避免每层 BFS
+    都重新解析整个项目。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []   # {line, callee, caller, confidence}
+        self.defs:  list[dict[str, Any]] = []   # {line, kind, name, signature, parent}
+        self._func_stack: list[str] = []
+        self._class_stack: list[str] = []
+
+    def _parent(self) -> str:
+        if self._func_stack:
+            return self._func_stack[-1]
+        if self._class_stack:
+            return self._class_stack[-1]
+        return "<module>"
+
+    def _visit_func(self, node: ast.FunctionDef | ast.AsyncFunctionDef, is_async: bool) -> None:
+        prefix = "async def" if is_async else "def"
+        sig = f"{prefix} {node.name}({ast.unparse(node.args)})"
+        if node.returns is not None:
+            sig += f" -> {ast.unparse(node.returns)}"
+        self.defs.append({
+            "line": node.lineno, "kind": "function",
+            "name": node.name, "signature": sig, "parent": self._parent(),
+        })
+        self._func_stack.append(node.name)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._func_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_func(node, is_async=False)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_func(node, is_async=True)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        bases = ", ".join(ast.unparse(b) for b in node.bases)
+        sig = f"class {node.name}({bases})" if bases else f"class {node.name}"
+        self.defs.append({
+            "line": node.lineno, "kind": "class",
+            "name": node.name, "signature": sig, "parent": self._parent(),
+        })
+        self._class_stack.append(node.name)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._class_stack.pop()
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        # A7：置信度分级——foo(x) 直呼必属同名函数（high）；
+        #     obj.foo() 只能按方法名匹配，可能是别的类的同名方法（medium）
+        if isinstance(func, ast.Name):
+            self.calls.append({
+                "line": node.lineno, "callee": func.id,
+                "caller": self._func_stack[-1] if self._func_stack else "<module>",
+                "confidence": "high",
+            })
+        elif isinstance(func, ast.Attribute):
+            self.calls.append({
+                "line": node.lineno, "callee": func.attr,
+                "caller": self._func_stack[-1] if self._func_stack else "<module>",
+                "confidence": "medium",
+            })
+        self.generic_visit(node)
+
+    def _record_assign_name(self, target: ast.expr, line: int) -> None:
+        if isinstance(target, ast.Name):
+            self.defs.append({
+                "line": line, "kind": "assignment",
+                "name": target.id, "signature": "", "parent": self._parent(),
+            })
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                self._record_assign_name(elt, line)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        # 只记录模块级 / 类体内的赋值（常量、类属性），函数内局部变量不算定义
+        if not self._func_stack:
+            for target in node.targets:
+                self._record_assign_name(target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if not self._func_stack and isinstance(node.target, ast.Name):
+            self._record_assign_name(node.target, node.lineno)
+        self.generic_visit(node)
+
+
+def _index_file(file_path: str) -> tuple[list[dict], list[dict]]:
+    """解析单个文件，返回 (calls, defs)，均附带 file 字段。解析失败返回空。"""
+    try:
+        source = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source, filename=file_path)
+    except Exception:
+        return [], []
+    visitor = _CallIndexVisitor()
+    visitor.visit(tree)
+    for rec in visitor.calls:
+        rec["file"] = file_path
+    for rec in visitor.defs:
+        rec["file"] = file_path
+    return visitor.calls, visitor.defs
+
+
+def _build_index(
+    project_path: str,
+    exclude_dirs: list[str] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """并发索引整个项目：返回 (所有调用点, 所有定义)。"""
+    validate_project_path(project_path)
+    excl = set(exclude_dirs) if exclude_dirs is not None else _DEFAULT_EXCLUDE
+
+    py_files: list[str] = []
+    for root, dirs, files in os.walk(project_path):
+        dirs[:] = [d for d in dirs if d not in excl]
+        for fname in files:
+            if fname.endswith(".py"):
+                py_files.append(os.path.join(root, fname))
+
+    all_calls: list[dict] = []
+    all_defs: list[dict] = []
+    with ThreadPoolExecutor(max_workers=min(8, len(py_files) or 1)) as pool:
+        futures = {pool.submit(_index_file, fp): fp for fp in py_files}
+        for future in as_completed(futures):
+            try:
+                calls, defs = future.result()
+                all_calls.extend(calls)
+                all_defs.extend(defs)
+            except Exception as e:
+                print(f"[field-impact-mcp] 跳过 {futures[future]}: {e}", file=sys.stderr)
+    return all_calls, all_defs
+
+
 def trace_callers(
     project_path: str,
     function_name: str,
     exclude_dirs: list[str] | None = None,
+    depth: int = 1,
+    max_results: int = 500,
 ) -> dict[str, Any]:
-    """A3：找出所有直接调用 function_name 的函数和文件。返回结构与 analyze_project 相同。"""
-    result = analyze_project(
-        project_path=project_path,
-        call_names=[function_name],
-        exclude_dirs=exclude_dirs,
+    """A3/A7：BFS 逐层找出调用 function_name 的函数（depth=1 为直接调用者，
+    depth=2 再找"调用者的调用者"，依此类推，上限 5 层）。
+
+    返回：
+        {
+          "target": 函数名, "max_depth": 实际使用的 depth,
+          "total_found": N, "truncated": bool,
+          "levels": [{"depth": n, "callers": [{file, line, caller_function, callee, confidence}]}]
+        }
+    注意：按名字匹配，obj.foo() 形式的命中可能是其他类的同名方法（confidence=medium）。
+    """
+    depth = max(1, min(depth, 5))
+    calls, _defs = _build_index(project_path, exclude_dirs)
+
+    levels: list[dict] = []
+    targets = {function_name}
+    visited = {function_name}
+    total = 0
+    truncated = False
+
+    for d in range(1, depth + 1):
+        hits = [c for c in calls if c["callee"] in targets]
+        hits.sort(key=lambda h: (h["file"], h["line"]))
+        if not hits:
+            break
+        if total + len(hits) > max_results:
+            hits = hits[: max_results - total]
+            truncated = True
+        levels.append({
+            "depth": d,
+            "callers": [{
+                "file": to_relative(h["file"], project_path),
+                "line": h["line"],
+                "caller_function": h["caller"],
+                "callee": h["callee"],
+                "confidence": h["confidence"],
+            } for h in hits],
+        })
+        total += len(hits)
+        if truncated:
+            break
+        # 下一层目标：本层命中的所在函数（<module> 级调用无法继续上溯）
+        targets = {h["caller"] for h in hits} - visited - {"<module>"}
+        visited |= targets
+        if not targets:
+            break
+
+    return {
+        "target": function_name,
+        "max_depth": depth,
+        "total_found": total,
+        "truncated": truncated,
+        "levels": levels,
+    }
+
+
+def find_definition(
+    project_path: str,
+    name: str,
+    exclude_dirs: list[str] | None = None,
+) -> dict[str, Any]:
+    """A8：找出符号的定义处（函数 / 类 / 模块级与类级赋值）。
+
+    返回与 analyze_project 一致的聚合结构，hits 为
+    {line, kind, name, signature, parent}（parent 为所在类/函数，顶层为 <module>）。
+    """
+    _calls, defs = _build_index(project_path, exclude_dirs)
+    matched = sorted(
+        (d for d in defs if d["name"] == name),
+        key=lambda d: (d["file"], d["line"]),
     )
-    files = []
-    for f in result["files"]:
-        hits = [h for h in f["hits"] if h["kind"] == "call"]
-        if hits:
-            files.append({"file": f["file"], "hits": hits})
-    n = sum(len(f["hits"]) for f in files)
-    return {"total_found": n, "returned": n, "truncated": result["truncated"], "files": files}
+
+    files: list[dict] = []
+    for d in matched:
+        rel = to_relative(d["file"], project_path)
+        if not files or files[-1]["file"] != rel:
+            files.append({"file": rel, "hits": []})
+        files[-1]["hits"].append({
+            "line": d["line"],
+            "kind": d["kind"],
+            "name": d["name"],
+            "signature": d["signature"],
+            "parent": d["parent"],
+        })
+
+    n = len(matched)
+    return {"total_found": n, "returned": n, "truncated": False, "files": files}
