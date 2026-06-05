@@ -4,6 +4,15 @@
 
 **字段级语义变更影响分析 · Field-Level Semantic Change Impact Analysis**
 
+[![PyPI](https://img.shields.io/pypi/v/ripple-impact-mcp)](https://pypi.org/project/ripple-impact-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/ripple-impact-mcp)](https://pypi.org/project/ripple-impact-mcp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://img.shields.io/badge/tests-72%20passed-brightgreen)](https://github.com/0xYubo/Ripple-Mcp/tree/main/tests)
+
+```bash
+pip install ripple-impact-mcp
+```
+
 [中文](#-中文) · [English](#-english)
 
 </div>
