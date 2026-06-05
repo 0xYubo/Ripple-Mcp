@@ -1,78 +1,91 @@
 # Ripple-MCP
 
 > 字段级语义变更影响分析 MCP Server，专为 Claude Code 设计。回答「改了这个字段/函数/配置，哪些代码会受影响」。
+> Field-level semantic change impact analysis MCP server, built for Claude Code. Answers "if I change this field / function / config, which code is affected?"
 
-## 适用场景
+## 适用场景 | Use Cases
 
-- 数据库字段改名或改类型，需要找出所有引用该字段的代码
-- 重构公共函数，需要找出所有调用方
-- 修改 API 路径，需要扫描前后端所有引用
-- 删除常量或枚举值，确认是否有残留引用
-- 修改坐标语义（如从左上角改为中心点），找出所有涉及计算的代码
-- 发布前评估改动影响范围，生成结构化报告
+- 数据库字段改名或改类型，找出所有引用该字段的代码 | Rename or retype a DB field and find every reference
+- 重构公共函数，找出所有调用方（含多层间接调用） | Refactor a shared function and find all callers (including indirect, multi-level)
+- 修改 API 路径，扫描前后端所有引用 | Change an API path and scan frontend and backend references
+- 删除常量或枚举值，确认是否有残留引用 | Delete a constant or enum value and confirm no leftover references
+- 修改字段语义（如坐标从左上角改为中心点），找出所有涉及计算的代码 | Change field semantics (e.g. coordinate origin from top-left to center) and find all affected computation
+- 发布前评估改动影响范围，生成结构化报告 | Assess blast radius before release and generate a structured report
 
-## MCP 工具列表
+## MCP 工具列表 | Tools
 
 ### scan_patterns
-在代码库中搜索任意正则表达式。支持 Python / TypeScript / JavaScript / SQL / YAML 等所有文本文件。
-- 输入：project_path, patterns（正则列表）, extensions（可选）
-- 输出：命中行列表，含文件路径、行号、代码内容、置信度
+在代码库中搜索任意正则表达式，支持 Python / TypeScript / JavaScript / SQL / YAML 等所有文本文件。
+Search any regex across the codebase; works on Python / TypeScript / JavaScript / SQL / YAML and any text file.
+- 输入 | Input: project_path, patterns (regex list), extensions (optional), max_results (default 500)
+- 输出 | Output: `{engine, total_found, returned, truncated, files: [{file, hits: [{line, code, patterns, confidence}]}]}` — 按文件聚合，file 为相对路径 | grouped by file, relative paths
 
 ### analyze_python_ast
 对 Python 代码做 AST 级别精确分析，比 grep 更准确。区分 obj.field / obj['field'] / obj.get('field') 三种访问方式，标注所在函数名和置信度。
-- 支持：field_names（字段访问）、string_values（字符串字面量）、symbols（标识符）、call_names（函数调用）、import_names（导入）
-- 输出：命中列表，含文件、行号、列号、所在函数、访问类型（kind）、置信度
+AST-level precise analysis for Python, more accurate than grep. Distinguishes obj.field / obj['field'] / obj.get('field'), annotates the enclosing function and confidence.
+- 支持 | Targets: field_names（字段访问 | field access）, string_values（字符串字面量 | string literals）, symbols（标识符 | identifiers）, call_names（函数调用 | calls）, import_names（导入 | imports）
+- 输出 | Output: `{total_found, returned, truncated, files: [{file, hits: [{line, kind, value, extra, function, confidence}]}]}`
 
 ### trace_callers
-找出项目中所有直接调用指定函数的函数和文件。
-- 输入：project_path, function_name
-- 输出：调用位置列表，含文件、行号、所在函数名
+BFS 多层调用链追踪：depth=1 找直接调用者，depth=2 再找「调用者的调用者」，最多 5 层。
+Multi-level call chain tracking via BFS: depth=1 finds direct callers, depth=2 walks up to "callers of callers", up to 5 levels.
+- 输入 | Input: project_path, function_name, depth (default 1, max 5), max_results (default 500)
+- 输出 | Output: `{target, max_depth, total_found, truncated, levels: [{depth, callers: [{file, line, caller_function, callee, confidence}]}]}`
+- confidence=high 为 foo(x) 直呼；medium 为 obj.foo() 按方法名匹配，可能是其他类的同名方法 | high = direct foo(x) call; medium = obj.foo() matched by method name, possibly a same-named method on another class
+
+### find_definition
+找出符号的定义处：函数（含完整签名）、类、模块级与类级赋值（常量、类属性）。与 trace_callers 配对：先看定义签名，再追调用链。
+Find where a symbol is defined: functions (with full signature), classes, module-level and class-level assignments. Pairs with trace_callers: inspect the signature first, then trace the chain.
+- 输入 | Input: project_path, name
+- 输出 | Output: `{total_found, returned, truncated, files: [{file, hits: [{line, kind, name, signature, parent}]}]}` — kind 为 function/class/assignment，parent 为所在类或 `<module>` | parent is the enclosing class or `<module>`
 
 ### get_code_context
-获取指定文件某一行前后的代码上下文，辅助判断命中处是否真正受影响。
-- 输入：file_path, line_number, context_lines（默认 6）
-- 输出：前后各 N 行的完整代码片段
+获取指定文件某一行前后的代码上下文，辅助判断命中处是否真正受影响。支持扫描结果中的相对路径（需同时传 project_path）。
+Fetch code context around a line to judge whether a hit is truly affected. Accepts relative paths from scan results (pass project_path along).
+- 输入 | Input: file_path, line_number, context_lines (default 6), project_path (required when file_path is relative)
+- 输出 | Output: 前后各 N 行代码片段，目标行以 >>> 标记 | N lines before/after, target line marked with >>>
 
 ### generate_impact_report
 将扫描结果聚合成结构化 Markdown 影响分析报告。自动读取服务端缓存，无需重新传递扫描结果。
-- 输入：change_description（自然语言描述变更）, project_path
-- 输出：Markdown 格式的影响报告，含高/中/低风险分类
+Aggregate scan results into a structured Markdown impact report. Reads the server-side cache automatically — no need to resend results.
+- 输入 | Input: change_description（自然语言变更描述 | natural-language change description）, project_path; scan_results / ast_results 可选，不传用缓存 | optional, defaults to server-side cache
+- 输出 | Output: Markdown 报告，含按文件分组的 AST/grep 命中表、截断提示与摘要统计 | Markdown report with per-file AST/grep hit tables, truncation notes and summary stats
 
-## 推荐工作流
+## 推荐工作流 | Recommended Workflow
 
 ```
-用户描述变更意图（自然语言）
-  → scan_patterns + analyze_python_ast（并行扫描）
-  → get_code_context（对可疑命中确认上下文）
-  → generate_impact_report（生成最终报告）
+描述变更意图 | Describe the change
+  → find_definition（看定义签名 | inspect the definition）
+  → scan_patterns + analyze_python_ast（并行扫描 | parallel scan）
+  → trace_callers（多层调用链 | multi-level call chain）
+  → get_code_context（确认可疑命中 | verify suspicious hits）
+  → generate_impact_report（生成报告 | generate the report）
 ```
 
-## 与其他工具的关系
+## 与其他工具的关系 | Relationship with Other Tools
 
-- 与 codegraph 互补：codegraph 做函数调用图，Ripple-MCP 做字段级语义分析
-- 不替代 LSP / IDE 跳转：专注于「变更影响范围」这一具体问题
-- 支持多语言：Python 有 AST 精确分析，TypeScript / JavaScript 用正则扫描
+- 与 codegraph 互补：codegraph 做函数调用图，Ripple-MCP 做字段级语义分析 | Complements codegraph: codegraph builds call graphs, Ripple-MCP does field-level semantic analysis
+- 不替代 LSP / IDE 跳转：专注于「变更影响范围」这一具体问题 | Not a replacement for LSP / IDE navigation — focused on "change blast radius"
+- 多语言支持：Python 有 AST 精确分析，TypeScript / JavaScript 用正则扫描 | Python gets precise AST analysis; TypeScript / JavaScript use regex scanning
 
-## 安装
+## 安装 | Install
 
 ```bash
-# 源码安装（当前推荐，PyPI 版本待发布）
+# 源码安装（当前推荐，PyPI 版本待发布）| From source (recommended; PyPI release pending)
 git clone https://github.com/0xYubo/Ripple-Mcp.git
 cd Ripple-Mcp
 pip install -e .
-claude mcp add ripple -s user \
-  -e PYTHONPATH=/path/to/Ripple-Mcp/src \
-  -- python3 -m field_impact_mcp
+claude mcp add ripple -s user -- ripple-mcp
 ```
 
-## 依赖
+## 依赖 | Dependencies
 
 - Python 3.10+
 - mcp >= 1.0.0
 - anyio >= 4.0.0
-- ripgrep（可选，自动降级到系统 grep）
+- ripgrep（可选，自动降级到系统 grep | optional, falls back to system grep）
 
-## 项目地址
+## 项目地址 | Project
 
 - GitHub: https://github.com/0xYubo/Ripple-Mcp
 - License: MIT
