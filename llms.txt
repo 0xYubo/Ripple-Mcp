@@ -42,7 +42,7 @@ Find where a symbol is defined: functions (with full signature), classes, module
 ### get_code_context
 获取指定文件某一行前后的代码上下文，辅助判断命中处是否真正受影响。支持扫描结果中的相对路径（需同时传 project_path）。
 Fetch code context around a line to judge whether a hit is truly affected. Accepts relative paths from scan results (pass project_path along).
-- 输入 | Input: file_path, line_number, context_lines (default 6), project_path (required when file_path is relative)
+- 输入 | Input: file_path + line_number（单点 | single）或 locations: [{file_path, line_number}]（批量，推荐 | batch, preferred）, context_lines (default 6), project_path (required when paths are relative)
 - 输出 | Output: 前后各 N 行代码片段，目标行以 >>> 标记 | N lines before/after, target line marked with >>>
 
 ### generate_impact_report

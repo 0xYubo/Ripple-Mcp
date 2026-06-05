@@ -216,6 +216,7 @@ claude mcp add ripple -s user -- ripple-mcp
 ```
 
 `file_path` 可直接使用扫描结果中的相对路径（需同时传 `project_path`），也可传绝对路径。
+验证多个命中时推荐批量模式：传 `locations: [{file_path, line_number}]` 数组，一次返回多段上下文。
 
 #### `generate_impact_report` — 生成影响报告
 
@@ -451,6 +452,7 @@ Returns definitions of functions / classes / module-level and class-level assign
 ```
 
 `file_path` accepts the relative paths from scan results (pass `project_path` along), or an absolute path.
+To verify multiple hits, prefer batch mode: pass `locations: [{file_path, line_number}]` to get all snippets in one call.
 
 #### `generate_impact_report` — impact report
 

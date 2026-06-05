@@ -23,6 +23,11 @@ _CONFIDENCE: dict[str, str] = {
     "attr_access":      "high",
     "subscript_access": "high",
     "get_call":         "high",
+    "getattr_call":     "high",
+    "setattr_call":     "high",
+    "hasattr_call":     "high",
+    "kwarg":            "medium",
+    "fstring_part":     "low",
     "call":             "medium",
     "function_def":     "medium",
     "class_def":        "medium",
@@ -158,11 +163,21 @@ class _UniversalVisitor(ast.NodeVisitor):
             self._add(node, "string_literal", node.value)
         self.generic_visit(node)
 
+    # 设计10：getattr/setattr/hasattr 的字段名在第 2 个参数
+    _ATTR_BUILTINS = {"getattr": "getattr_call", "setattr": "setattr_call", "hasattr": "hasattr_call"}
+
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
         name = None
         if isinstance(func, ast.Name):
             name = func.id
+            # 设计10：getattr(obj, 'x') / setattr(obj, 'x', v) / hasattr(obj, 'x') 视为字段访问
+            if name in self._ATTR_BUILTINS and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                val = node.args[1].value
+                if isinstance(val, str) and val in self.field_names:
+                    obj = ast.unparse(node.args[0])
+                    self._add(node, self._ATTR_BUILTINS[name], val, obj)
+                    self._suppressed.add(id(node.args[1]))  # 防止 visit_Constant 再记 string_literal
         elif isinstance(func, ast.Attribute):
             name = func.attr
             if name == "get" and node.args and isinstance(node.args[0], ast.Constant):
@@ -173,9 +188,24 @@ class _UniversalVisitor(ast.NodeVisitor):
                 if isinstance(val, str) and val in self.string_values:
                     self._add(node, "get_call_str", str(val))
                     self._suppressed.add(id(node.args[0]))  # Bug 2：防止 visit_Constant 再记 string_literal
+        # 设计10：关键字参数名命中字段名，如 Machine(x=1) / dict(x=1)；构造函数传参常与字段一一对应
+        for kw in node.keywords:
+            if kw.arg is not None and kw.arg in self.field_names:
+                callee = ast.unparse(func)
+                self._add(node, "kwarg", kw.arg, callee)
         if name and (name in self.call_names or name in self.symbols):
             self._add(node, "call", name)
             self._suppressed.add(id(func))  # Bug 1：压制 func 节点，阻止 visit_Name/visit_Attribute 重复记录
+        self.generic_visit(node)
+
+    def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
+        # 设计10：f-string 的常量片段做子串匹配（f"status={s}" 能命中 'status'），置信度 low
+        for part in node.values:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                self._suppressed.add(id(part))   # f-string 片段不再走 visit_Constant 的精确匹配
+                for sv in self.string_values:
+                    if sv and sv in part.value:
+                        self._add(node, "fstring_part", sv, part.value[:60])
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -238,11 +268,24 @@ def analyze_file(
     import_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """分析单个 Python 文件，返回所有命中记录。"""
+    hits, _ok = _analyze_file_ex(file_path, symbols, field_names, string_values, call_names, import_names)
+    return hits
+
+
+def _analyze_file_ex(
+    file_path: str,
+    symbols: list[str] | None = None,
+    field_names: list[str] | None = None,
+    string_values: list[str] | None = None,
+    call_names: list[str] | None = None,
+    import_names: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """问题8：返回 (hits, 是否解析成功)，让 analyze_project 能统计被跳过的文件。"""
     try:
         source = Path(file_path).read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(source, filename=file_path)
     except Exception:
-        return []
+        return [], False
 
     visitor = _UniversalVisitor(
         symbols=set(symbols or []),
@@ -255,7 +298,7 @@ def analyze_file(
 
     for hit in visitor.hits:
         hit["file"] = file_path
-    return visitor.hits
+    return visitor.hits, True
 
 
 def analyze_project(
@@ -290,19 +333,24 @@ def analyze_project(
                 py_files.append(os.path.join(root, fname))
 
     all_hits: list[dict] = []
+    skipped: list[str] = []   # 问题8：解析失败的文件显式上报，不再只打 stderr
 
     with ThreadPoolExecutor(max_workers=min(8, len(py_files) or 1)) as pool:
         futures = {
             pool.submit(
-                analyze_file, fp,
+                _analyze_file_ex, fp,
                 symbols, field_names, string_values, call_names, import_names,
             ): fp
             for fp in py_files
         }
         for future in as_completed(futures):
             try:
-                all_hits.extend(future.result())
+                hits, ok = future.result()
+                all_hits.extend(hits)
+                if not ok:
+                    skipped.append(futures[future])
             except Exception as e:
+                skipped.append(futures[future])
                 print(f"[field-impact-mcp] 跳过 {futures[future]}: {e}", file=sys.stderr)
 
     all_hits.sort(key=lambda h: (h["file"], h["line"]))
@@ -327,12 +375,17 @@ def analyze_project(
             "confidence": hit["confidence"],
         })
 
-    return {
+    result: dict[str, Any] = {
         "total_found": total_found,
         "returned": len(all_hits),
         "truncated": truncated,
         "files": files,
     }
+    if skipped:
+        # 问题8：解析失败的文件显式上报（相对路径，最多列 20 个）
+        result["skipped_files"] = [to_relative(fp, project_path) for fp in skipped[:20]]
+        result["skipped_count"] = len(skipped)
+    return result
 
 
 # ── 调用索引（A7：trace_callers 多层 BFS 与 find_definition 共享）────────

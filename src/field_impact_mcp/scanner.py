@@ -46,14 +46,21 @@ def _validate_patterns(patterns: list[str]) -> None:
             raise ValueError(f"无效正则表达式 {pat!r}: {e}") from e
 
 
-def _rg_search(project_path: str, pattern: str, extensions: list[str], exclude: list[str]) -> list[dict]:
+def _rg_search(project_path: str, pattern: str, extensions: list[str], exclude: list[str]) -> tuple[list[dict], str | None]:
+    """问题8：返回 (hits, error)，超时/引擎报错不再静默吞掉。"""
     ext_args = [arg for ext in extensions for arg in ["--glob", f"*{ext}"]]
     excl_args = [arg for d in exclude for arg in ["--glob", f"!{d}/**"]]
-    cmd = ["rg", "--json", "--line-number", pattern] + ext_args + excl_args + [project_path]
+    # 问题7：--no-ignore --hidden 与 grep 行为对齐（grep 不尊重 .gitignore、不跳过隐藏文件），
+    #        排除目录统一由 exclude globs 控制，保证两个引擎结果一致
+    cmd = (["rg", "--json", "--line-number", "--no-ignore", "--hidden", pattern]
+           + ext_args + excl_args + [project_path])
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
-        return []
+        return [], f"pattern {pattern!r}: rg 搜索超时（60s），结果不完整"
+    # rg 退出码：0 有命中，1 无命中，2 出错
+    if result.returncode == 2:
+        return [], f"pattern {pattern!r}: rg 出错: {result.stderr.strip()[:200]}"
     hits = []
     for line in result.stdout.splitlines():
         try:
@@ -69,17 +76,21 @@ def _rg_search(project_path: str, pattern: str, extensions: list[str], exclude: 
                 })
         except (json.JSONDecodeError, KeyError):
             continue
-    return hits
+    return hits, None
 
 
-def _grep_search(project_path: str, pattern: str, extensions: list[str], exclude: list[str]) -> list[dict]:
+def _grep_search(project_path: str, pattern: str, extensions: list[str], exclude: list[str]) -> tuple[list[dict], str | None]:
+    """问题8：返回 (hits, error)，超时/引擎报错不再静默吞掉。"""
     include_args = [f"--include=*{ext}" for ext in extensions]
     excl_args = [f"--exclude-dir={d}" for d in exclude]
     cmd = ["grep", "-rn", "-E", pattern] + include_args + excl_args + [project_path]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
-        return []
+        return [], f"pattern {pattern!r}: grep 搜索超时（60s），结果不完整"
+    # grep 退出码：0 有命中，1 无命中，2 出错
+    if result.returncode == 2:
+        return [], f"pattern {pattern!r}: grep 出错: {result.stderr.strip()[:200]}"
     hits = []
     for line in result.stdout.splitlines():
         parts = line.split(":", 2)
@@ -95,7 +106,7 @@ def _grep_search(project_path: str, pattern: str, extensions: list[str], exclude
             })
         except ValueError:
             continue
-    return hits
+    return hits, None
 
 
 def scan(
@@ -127,8 +138,12 @@ def scan(
 
     # B3：key → hit，同一行多个 pattern 合并到 patterns 列表
     seen: dict[tuple, dict] = {}
+    errors: list[str] = []   # 问题8：收集引擎超时/报错，显式上报
     for pat in patterns:
-        for hit in searcher(project_path, pat, exts, excl):
+        pat_hits, error = searcher(project_path, pat, exts, excl)
+        if error:
+            errors.append(error)
+        for hit in pat_hits:
             key = (hit["file"], hit["line"])
             if key not in seen:
                 entry = {**hit, "patterns": [hit["pattern"]]}
@@ -157,13 +172,16 @@ def scan(
             "confidence": hit["confidence"],
         })
 
-    return {
+    result: dict[str, Any] = {
         "engine": "rg" if use_rg else "grep",
         "total_found": total_found,
         "returned": len(flat),
         "truncated": truncated,
         "files": files,
     }
+    if errors:
+        result["errors"] = errors   # 问题8：有错必报，避免"无命中"误导
+    return result
 
 
 def get_context(
@@ -193,3 +211,22 @@ def get_context(
         return "\n".join(snippet)
     except Exception as e:
         return f"(无法读取: {e})"
+
+
+def get_contexts(
+    locations: list[dict],
+    context_lines: int = 6,
+    project_path: str | None = None,
+) -> str:
+    """设计9：批量获取多处代码上下文，一次调用替代多次往返。
+    locations 每项为 {"file_path": ..., "line_number": ...}（兼容 {"file", "line"} 键名）。
+    """
+    if not locations:
+        return "(locations 为空)"
+    sections = []
+    for loc in locations:
+        fp = loc.get("file_path") or loc.get("file", "")
+        ln = loc.get("line_number") or loc.get("line", 0)
+        sections.append(f"── {fp}:{ln} ──")
+        sections.append(get_context(fp, ln, context_lines, project_path))
+    return "\n".join(sections)

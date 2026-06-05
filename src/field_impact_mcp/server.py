@@ -14,9 +14,12 @@ from mcp.server import Server
 
 from .ast_analyzer import analyze_project, find_definition, trace_callers
 from .reporter import build_report
-from .scanner import get_context, scan
+from .scanner import get_context, get_contexts, scan
 
 server = Server("field-impact-mcp")
+
+# 设计11：全部工具均为只读，声明 readOnlyHint 让客户端可免确认执行
+_READ_ONLY = types.ToolAnnotations(readOnlyHint=True)
 
 # A1：服务端会话缓存，key = project_path
 # 新问题3修复：改用 OrderedDict 实现 LRU 驱逐（最近使用的留在末尾，超限淘汰头部），
@@ -54,6 +57,7 @@ async def list_tools() -> list[types.Tool]:
         # ── 1. 通用 pattern 扫描 ─────────────────────────────────────
         types.Tool(
             name="scan_patterns",
+            annotations=_READ_ONLY,
             description=(
                 "在代码库中搜索任意正则表达式 pattern，支持 Python/TypeScript/JavaScript/任意文本文件。"
                 "这是最通用的搜索工具，适用于所有变更场景：字段访问、函数调用、字符串值、常量、"
@@ -105,6 +109,7 @@ async def list_tools() -> list[types.Tool]:
         # ── 2. Python AST 精确分析 ────────────────────────────────────
         types.Tool(
             name="analyze_python_ast",
+            annotations=_READ_ONLY,
             description=(
                 "对 Python 代码做 AST 级别精确分析，比 grep 更准确。"
                 "支持多种搜索目标，可同时指定多类：\n"
@@ -136,16 +141,28 @@ async def list_tools() -> list[types.Tool]:
         # ── 3. 代码上下文查看 ─────────────────────────────────────────
         types.Tool(
             name="get_code_context",
+            annotations=_READ_ONLY,
             description=(
-                "获取指定文件某一行前后的代码上下文，帮助判断命中处是否真正受变更影响。"
-                "当 scan_patterns 或 analyze_python_ast 返回的代码片段不足以判断时，调用此工具。"
+                "获取代码上下文，帮助判断命中处是否真正受变更影响。"
+                "支持两种模式：单点（file_path + line_number）或批量（locations 数组，推荐——"
+                "验证多个命中时一次调用替代多次往返）。"
             ),
             inputSchema={
                 "type": "object",
-                "required": ["file_path", "line_number"],
                 "properties": {
-                    "file_path": {"type": "string", "description": "文件路径；可传扫描结果中的相对路径（需同时传 project_path）或绝对路径"},
-                    "line_number": {"type": "integer", "description": "目标行号（从 1 开始）"},
+                    "file_path": {"type": "string", "description": "单点模式：文件路径；可传扫描结果中的相对路径（需同时传 project_path）或绝对路径"},
+                    "line_number": {"type": "integer", "description": "单点模式：目标行号（从 1 开始）"},
+                    "locations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {"type": "string"},
+                                "line_number": {"type": "integer"},
+                            },
+                        },
+                        "description": "批量模式：[{file_path, line_number}] 数组，一次返回多段上下文",
+                    },
                     "context_lines": {"type": "integer", "description": "前后各显示行数，默认 6", "default": 6},
                     "project_path": {"type": "string", "description": "项目根目录绝对路径；file_path 为相对路径时必传"},
                 },
@@ -155,6 +172,7 @@ async def list_tools() -> list[types.Tool]:
         # ── 4. 生成报告（A1：支持服务端缓存，scan_results/ast_results 可选）────
         types.Tool(
             name="generate_impact_report",
+            annotations=_READ_ONLY,
             description=(
                 "将扫描结果聚合成结构化 Markdown 影响分析报告。"
                 "若不传 scan_results/ast_results，自动使用该 project_path 的最近一次扫描缓存。"
@@ -184,6 +202,7 @@ async def list_tools() -> list[types.Tool]:
         # ── 5. 调用链追踪（A3/A7：多层 BFS）──────────────────────────
         types.Tool(
             name="trace_callers",
+            annotations=_READ_ONLY,
             description=(
                 "BFS 逐层找出调用指定函数的函数：depth=1 为直接调用者，"
                 "depth=2 再找「调用者的调用者」，依此类推（上限 5 层）。"
@@ -208,6 +227,7 @@ async def list_tools() -> list[types.Tool]:
         # ── 6. 符号定义查找（A8）─────────────────────────────────────
         types.Tool(
             name="find_definition",
+            annotations=_READ_ONLY,
             description=(
                 "找出符号在项目中的定义处：函数定义、类定义、模块级/类级赋值（常量、类属性）。"
                 "与 trace_callers 配对使用——先找定义看签名，再追调用链。"
@@ -252,6 +272,8 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
             exclude_dirs=exclude_dirs,
             max_results=max_results,
         )
+        # 问题10：结果自带查询摘要，缓存被 generate_impact_report 使用时可追溯来源
+        results["query"] = {"patterns": args["patterns"]}
         _cache_set(project_path, "scan_results", results)
         return _to_json(results)
 
@@ -271,10 +293,25 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
             exclude_dirs=exclude_dirs,
             max_results=args.get("max_results", 500),   # 设计6：与 scan_patterns 对称
         )
+        # 问题10：结果自带查询摘要，缓存被 generate_impact_report 使用时可追溯来源
+        results["query"] = {
+            k: args[k]
+            for k in ("symbols", "field_names", "string_values", "call_names", "import_names")
+            if args.get(k)
+        }
         _cache_set(project_path, "ast_results", results)
         return _to_json(results)
 
     elif name == "get_code_context":
+        # 设计9：locations 批量模式优先；否则走单点模式
+        if args.get("locations"):
+            return get_contexts(
+                locations=args["locations"],
+                context_lines=args.get("context_lines", 6),
+                project_path=args.get("project_path"),
+            )
+        if "file_path" not in args or "line_number" not in args:
+            return "错误：需提供 file_path + line_number，或 locations 数组"
         return get_context(
             file_path=args["file_path"],
             line_number=args["line_number"],

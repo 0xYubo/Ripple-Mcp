@@ -366,6 +366,88 @@ def test_find_definition_function_and_class(tmp_path):
     assert r_local["total_found"] == 0
 
 
+def test_ast_getattr_setattr_hasattr(tmp_path):
+    """设计10：getattr/setattr/hasattr 的字符串字段名应被识别为字段访问（high）"""
+    f = tmp_path / "ga.py"
+    f.write_text(
+        "v = getattr(m, 'x', None)\n"
+        "setattr(m, 'x', 1)\n"
+        "ok = hasattr(m, 'x')\n"
+        "other = getattr(m, 'y')\n"
+    )
+    hits = analyze_file(str(f), field_names=["x"])
+    kinds = sorted(h["kind"] for h in hits)
+    assert kinds == ["getattr_call", "hasattr_call", "setattr_call"], f"实际 {kinds}"
+    assert all(h["confidence"] == "high" for h in hits)
+    assert all(h["extra"] == "m" for h in hits)
+
+
+def test_ast_getattr_no_double_string_literal(tmp_path):
+    """设计10：getattr 命中字段名后，同名 string_values 不应再产生 string_literal"""
+    f = tmp_path / "gb.py"
+    f.write_text("v = getattr(m, 'x')\n")
+    hits = analyze_file(str(f), field_names=["x"], string_values=["x"])
+    kinds = [h["kind"] for h in hits]
+    assert "string_literal" not in kinds, f"实际 kinds={kinds}"
+    assert "getattr_call" in kinds
+
+
+def test_ast_kwarg_field(tmp_path):
+    """设计10：关键字参数名命中字段名，如 Machine(x=1)"""
+    f = tmp_path / "kw.py"
+    f.write_text("m = Machine(x=1, name='a')\nd = dict(x=2)\n")
+    hits = analyze_file(str(f), field_names=["x"])
+    kwarg_hits = [h for h in hits if h["kind"] == "kwarg"]
+    assert len(kwarg_hits) == 2
+    assert {h["extra"] for h in kwarg_hits} == {"Machine", "dict"}
+    assert all(h["confidence"] == "medium" for h in kwarg_hits)
+
+
+def test_ast_fstring_substring(tmp_path):
+    """设计10：f-string 常量片段子串匹配 string_values，置信度 low"""
+    f = tmp_path / "fs.py"
+    f.write_text("msg = f\"status={s}, done\"\nplain = 'nothing here'\n")
+    hits = analyze_file(str(f), string_values=["status"])
+    assert len(hits) == 1
+    assert hits[0]["kind"] == "fstring_part"
+    assert hits[0]["value"] == "status"
+    assert hits[0]["confidence"] == "low"
+
+
+def test_ast_skipped_files_reported(tmp_path):
+    """问题8：语法错误的文件应记入 skipped_files，而非静默消失"""
+    (tmp_path / "good.py").write_text("x = obj.status\n")
+    (tmp_path / "bad.py").write_text("def broken(:\n")
+    results = analyze_project(str(tmp_path), field_names=["status"])
+    assert results["skipped_count"] == 1
+    assert results["skipped_files"] == ["bad.py"]
+    assert results["total_found"] == 1
+
+
+def test_scan_engine_error_reported(tmp_path, monkeypatch):
+    """问题8：搜索引擎超时/出错应出现在 errors 字段，而非静默返回空"""
+    from field_impact_mcp import scanner as sc
+    (tmp_path / "a.py").write_text("x = 1\n")
+    monkeypatch.setattr(sc, "_has_ripgrep", lambda: False)
+    monkeypatch.setattr(sc, "_grep_search", lambda *a: ([], "pattern 'x': grep 搜索超时（60s），结果不完整"))
+    results = sc.scan(str(tmp_path), [r"x"], [".py"], [])
+    assert results["total_found"] == 0
+    assert "errors" in results and "超时" in results["errors"][0]
+
+
+def test_get_contexts_batch(tmp_path):
+    """设计9：批量上下文，含相对路径解析与分隔标题"""
+    from field_impact_mcp.scanner import get_contexts
+    (tmp_path / "a.py").write_text("l1\nl2\nl3\n")
+    out = get_contexts(
+        [{"file_path": "a.py", "line_number": 2}, {"file": "a.py", "line": 3}],
+        context_lines=1,
+        project_path=str(tmp_path),
+    )
+    assert "── a.py:2 ──" in out and "── a.py:3 ──" in out
+    assert out.count(">>>") == 2
+
+
 def test_find_definition_class_attr(tmp_path):
     """A8：类属性赋值记录为 assignment，parent 为类名"""
     from field_impact_mcp.ast_analyzer import find_definition

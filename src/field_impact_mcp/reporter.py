@@ -60,6 +60,19 @@ def build_report(
     lines.append(f"**变更描述**：{change_description}\n")
     lines.append(f"**项目路径**：`{project_path}`\n")
     lines.append(f"**扫描命中**：{scan['total_found']} 处（grep）｜{ast['total_found']} 处（AST）\n")
+    # 问题10：标注结果来自哪个查询（缓存模式下可追溯，避免误用旧扫描）
+    query_parts = []
+    if scan.get("query"):
+        query_parts.append(f"grep: `{scan['query']}`")
+    if ast.get("query"):
+        query_parts.append(f"AST: `{ast['query']}`")
+    if query_parts:
+        lines.append(f"**结果来源查询**：{' ｜ '.join(query_parts)}\n")
+    # 问题8：扫描引擎错误与解析失败必须显式呈现
+    for err in scan.get("errors", []):
+        lines.append(f"> ⚠️ 扫描错误：{err}\n")
+    if ast.get("skipped_count"):
+        lines.append(f"> ⚠️ {ast['skipped_count']} 个 Python 文件解析失败被跳过：{', '.join(ast.get('skipped_files', []))}\n")
     lines.append("---\n")
 
     # ── AST 结果（精确，按文件分组）──
