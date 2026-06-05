@@ -46,7 +46,13 @@
 
 **环境要求：** Python 3.10+
 
-> 📦 尚未发布到 PyPI（`pip install ripple-mcp` 暂不可用），目前请通过源码安装：
+```bash
+pip install ripple-impact-mcp
+```
+
+> 包名为 `ripple-impact-mcp`（PyPI 上 `ripple-mcp` 已被占用），安装后的命令行入口仍是 `ripple-mcp`。
+
+或源码安装：
 
 ```bash
 git clone https://github.com/0xYubo/Ripple-Mcp.git
@@ -282,7 +288,13 @@ When you want to analyze the impact of "changing `machine.x/y` semantics" or "co
 
 **Requirements:** Python 3.10+
 
-> 📦 Not yet published to PyPI (`pip install ripple-mcp` is not available yet) — install from source for now:
+```bash
+pip install ripple-impact-mcp
+```
+
+> The package name is `ripple-impact-mcp` (`ripple-mcp` was taken on PyPI); the installed CLI entry point is still `ripple-mcp`.
+
+Or install from source:
 
 ```bash
 git clone https://github.com/0xYubo/Ripple-Mcp.git

@@ -71,10 +71,7 @@ Aggregate scan results into a structured Markdown impact report. Reads the serve
 ## 安装 | Install
 
 ```bash
-# 源码安装（当前推荐，PyPI 版本待发布）| From source (recommended; PyPI release pending)
-git clone https://github.com/0xYubo/Ripple-Mcp.git
-cd Ripple-Mcp
-pip install -e .
+pip install ripple-impact-mcp   # PyPI 包名 | PyPI package name (CLI entry: ripple-mcp)
 claude mcp add ripple -s user -- ripple-mcp
 ```
 
